@@ -214,15 +214,8 @@ class Deployer(object):
     LAMBDA_CREATE_ATTEMPTS = 5
     DELAY_TIME = 3
 
-    def __init__(self, session=None, prompter=None, profile=None):
-        # type: (botocore.session.Session, NoPrompt, Optional[str]) -> None
-        if session is None:
-            if profile:
-                session = botocore.session.Session(profile=profile)
-            else:
-                session = botocore.session.get_session()
-        if prompter is None:
-            prompter = NoPrompt()
+    def __init__(self, session, prompter):
+        # type: (botocore.session.Session, NoPrompt) -> None
         self._session = session
         self._prompter = prompter
         self._client_cache = {}
@@ -230,6 +223,7 @@ class Deployer(object):
         # Note: I'm using "Any" for clients until we figure out
         # a way to have concrete types for botocore clients.
         self._packager = LambdaDeploymentPackager()
+        self._aws_client = TypedAWSClient(self._session)
         self._query = ResourceQuery(
             self._client('lambda'),
             self._client('apigateway'),
@@ -256,8 +250,7 @@ class Deployer(object):
         """
         validate_configuration(config)
         lambda_deploy = LambdaDeployer(
-            self._query, self._client('iam'), self._client('lambda'),
-            self._packager, self._prompter
+            self._aws_client, self._packager, self._prompter
         )
         lambda_deploy.deploy(config)
 
@@ -627,24 +620,16 @@ class LambdaDeployer(object):
     LAMBDA_CREATE_ATTEMPTS = 5
     DELAY_TIME = 3
 
-    def __init__(self,
-                 resource_query,  # type: ResourceQuery
-                 iam_client,      # type: Any
-                 lambda_client,   # type: Any
-                 packager,        # type: LambdaDeploymentPackager
-                 prompter         # type: NoPrompt
-                 ):
-        # type: (...) -> None
-        self._query = resource_query
-        self._iam_client = iam_client
-        self._lambda_client = lambda_client
+    def __init__(self, aws_client, packager, prompter):
+        # type: (TypedAWSClient, LambdaDeploymentPackager, NoPrompt) -> None
+        self._aws_client = aws_client
         self._packager = packager
         self._prompter = prompter
 
     def deploy(self, config):
         # type: (Config) -> None
         app_name = config.app_name
-        if self._query.lambda_function_exists(app_name):
+        if self._aws_client.lambda_function_exists(app_name):
             self._get_or_create_lambda_role_arn(config)
             self._update_lambda_function(config)
         else:
@@ -664,20 +649,12 @@ class LambdaDeployer(object):
 
         app_name = config.app_name
         try:
-            role_arn = self._find_role_arn(app_name)
+            role_arn = self._aws_client.get_role_arn_for_name(app_name)
             self._update_role_with_latest_policy(app_name, config)
         except ValueError:
             print "Creating role"
             role_arn = self._create_role_from_source_code(config)
         return role_arn
-
-    def _find_role_arn(self, role_name):
-        # type: (str) -> str
-        response = self._iam_client.list_roles()
-        for role in response.get('Roles', []):
-            if role['RoleName'] == role_name:
-                return role['Arn']
-        raise ValueError("No role ARN found for: %s" % role_name)
 
     def _update_role_with_latest_policy(self, app_name, config):
         # type: (str, Config) -> None
@@ -698,12 +675,11 @@ class LambdaDeployer(object):
                     print action
             self._prompter.confirm("\nWould you like to continue? ",
                                    default=True, abort=True)
-        iam = self._iam_client
-        iam.delete_role_policy(RoleName=app_name,
-                               PolicyName=app_name)
-        iam.put_role_policy(RoleName=app_name,
-                            PolicyName=app_name,
-                            PolicyDocument=json.dumps(app_policy, indent=2))
+        self._aws_client.delete_role_policy(
+            role_name=app_name, policy_name=app_name)
+        self._aws_client.put_role_policy(role_name=app_name,
+                                         policy_name=app_name,
+                                         policy_document=app_policy)
         self._record_policy(config, app_policy)
 
     def _get_policy_from_source_code(self, config):
@@ -747,40 +723,8 @@ class LambdaDeployer(object):
             config.project_dir)
         with open(zip_filename, 'rb') as f:
             zip_contents = f.read()
-        return self._create_function(app_name, role_arn, zip_contents)
-
-    def _create_function(self, app_name, role_arn, zip_contents):
-        # type: (str, str, str) -> str
-        # The first time we create a role, there's a delay between
-        # role creation and being able to use the role in the
-        # creat_function call.  If we see this error, we'll retry
-        # a few times.
-        client = self._lambda_client
-        current = 0
-        while True:
-            try:
-                response = client.create_function(
-                    FunctionName=app_name,
-                    Runtime='python2.7',
-                    Code={'ZipFile': zip_contents},
-                    Handler='app.app',
-                    Role=role_arn,
-                    Timeout=60
-                )
-            except botocore.exceptions.ClientError as e:
-                code = e.response['Error'].get('Code')
-                if code == 'InvalidParameterValueException':
-                    # We're assuming that if we receive an
-                    # InvalidParameterValueException, it's because
-                    # the role we just created can't be used by
-                    # Lambda.
-                    time.sleep(self.DELAY_TIME)
-                    current += 1
-                    if current >= self.LAMBDA_CREATE_ATTEMPTS:
-                        raise
-                    continue
-                raise
-            return response['FunctionArn']
+        return self._aws_client.create_function(
+            app_name, role_arn, zip_contents)
 
     def _update_lambda_function(self, config):
         # type: (Config) -> None
@@ -797,11 +741,9 @@ class LambdaDeployer(object):
                 project_dir)
         with open(deployment_package_filename, 'rb') as f:
             zip_contents = f.read()
-            client = self._lambda_client
             print "Sending changes to lambda."
-            client.update_function_code(
-                FunctionName=config.app_name,
-                ZipFile=zip_contents)
+            self._aws_client.update_function_code(config.app_name,
+                                                  zip_contents)
 
     def _write_config_to_disk(self, config):
         # type: (Config) -> None
@@ -819,14 +761,11 @@ class LambdaDeployer(object):
             print json.dumps(app_policy, indent=2)
             self._prompter.confirm("Would you like to continue? ",
                                    default=True, abort=True)
-        iam = self._iam_client
-        role_arn = iam.create_role(
-            RoleName=app_name,
-            AssumeRolePolicyDocument=json.dumps(
-                LAMBDA_TRUST_POLICY))['Role']['Arn']
-        iam.put_role_policy(RoleName=app_name,
-                            PolicyName=app_name,
-                            PolicyDocument=json.dumps(app_policy, indent=2))
+        role_arn = self._aws_client.create_role(
+            name=app_name,
+            trust_policy=LAMBDA_TRUST_POLICY,
+            policy=app_policy
+        )
         self._record_policy(config, app_policy)
         return role_arn
 
@@ -931,3 +870,101 @@ class APIGatewayDeployer(object):
             stageName=stage,
         )
         return rest_api_id, client.meta.region_name, stage
+
+
+class TypedAWSClient(object):
+
+    LAMBDA_CREATE_ATTEMPTS = 5
+    DELAY_TIME = 3
+
+    def __init__(self, session):
+        # type: (botocore.session.Session) -> None
+        self._session = session
+        self._client_cache = {}
+        # type: Dict[str, Any]
+
+    def lambda_function_exists(self, name):
+        # type: (str) -> bool
+        try:
+            self._client('lambda').get_function(FunctionName=name)
+        except botocore.exceptions.ClientError as e:
+            error = e.response['Error']
+            if error['Code'] == 'ResourceNotFoundException':
+                return False
+            raise
+        return True
+
+    def create_function(self, function_name, role_arn, zip_contents):
+        # type: (str, str, str) -> str
+        kwargs = {
+            'FunctionName': function_name,
+            'Runtime': 'python2.7',
+            'Code': {'ZipFile': zip_contents},
+            'Handler': 'app.app',
+            'Role': role_arn,
+            'Timeout': 60,
+        }
+        client = self._client('lambda')
+        attempts = 0
+        while True:
+            try:
+                response = client.create_function(**kwargs)
+            except botocore.exceptions.ClientError as e:
+                code = e.response['Error'].get('Code')
+                if code == 'InvalidParameterValueException':
+                    # We're assuming that if we receive an
+                    # InvalidParameterValueException, it's because
+                    # the role we just created can't be used by
+                    # Lambda.
+                    time.sleep(self.DELAY_TIME)
+                    attempts += 1
+                    if attempts >= self.LAMBDA_CREATE_ATTEMPTS:
+                        raise
+                    continue
+                raise
+            return response['FunctionArn']
+
+    def update_function_code(self, function_name, zip_contents):
+        # type: (str, str) -> None
+        self._client('lambda').update_function_code(
+            FunctionName=function_name, ZipFile=zip_contents)
+
+    def get_role_arn_for_name(self, name):
+        # type: (str) -> str
+        response = self._client('iam').list_roles()
+        for role in response.get('Roles', []):
+            if role['RoleName'] == name:
+                return role['Arn']
+        raise ValueError("No role ARN found for: %s" % name)
+
+    def delete_role_policy(self, role_name, policy_name):
+        # type: (str, str) -> None
+        self._client('iam').delete_role_policy(RoleName=role_name,
+                                               PolicyName=policy_name)
+
+    def put_role_policy(self, role_name, policy_name, policy_document):
+        # type: (str, str, Dict[str, Any]) -> None
+        # Note: policy_document is not JSON encoded.
+        self._client('iam').put_role_policy(
+            RoleName=role_name,
+            PolicyName=policy_name,
+            PolicyDocument=json.dumps(policy_document, indent=2))
+
+    def create_role(self, name, trust_policy, policy):
+        # type: (str, Dict[str, Any], Dict[str, Any]) -> str
+        client = self._client('iam')
+        response = client.create_role(
+            RoleName=name,
+            AssumeRolePolicyDocument=json.dumps(trust_policy)
+        )
+        role_arn = response['Role']['Arn']
+        self.put_role_policy(role_name=name, policy_name=name,
+                             policy_document=policy)
+        return role_arn
+
+    def _client(self, service_name):
+        # type: (str) -> Any
+        if service_name not in self._client_cache:
+            self._client_cache[service_name] = self._session.create_client(
+                service_name)
+        return self._client_cache[service_name]
