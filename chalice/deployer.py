@@ -748,14 +748,12 @@ class APIGatewayDeployer(object):
 
     def _remove_all_resources(self, rest_api_id):
         # type: (str) -> None
-        client = self._api_gateway_client
         all_resources = self._aws_client.get_resources_for_api(rest_api_id)
         first_tier_ids = [r['id'] for r in all_resources
                           if r['path'].count('/') == 1 and r['path'] != '/']
         print "Deleting root resource id"
         for resource_id in first_tier_ids:
-            client.delete_resource(restApiId=rest_api_id,
-                                   resourceId=resource_id)
+            self._aws_client.delete_resource_for_api(rest_api_id, resource_id)
         root_resource = [r for r in all_resources if r['path'] == '/'][0]
         # We can't delete the root resource, but we need to remove all the
         # existing methods otherwise we'll get 4xx from API gateway when we
@@ -784,13 +782,12 @@ class APIGatewayDeployer(object):
 
     def _create_resources_for_api(self, config, rest_api_id):
         # type: (Config, str) -> Tuple[str, str, str]
-        client = self._api_gateway_client
         url_trie = build_url_trie(config.chalice_app.routes)
         root_resource = self._aws_client.get_root_resource_for_api(rest_api_id)
         assert root_resource['path'] == u'/'
         resource_id = root_resource['id']
         route_builder = APIGatewayResourceCreator(
-            client, self._lambda_client, rest_api_id,
+            self._api_gateway_client, self._lambda_client, rest_api_id,
             config.lambda_arn)
         # This is a little confusing.  You need to specify the parent
         # resource to create a subresource, but you can't create the root
@@ -807,11 +804,8 @@ class APIGatewayDeployer(object):
         # API gateway.
         stage = config.stage_name or 'dev'
         print "Deploying to:", stage
-        client.create_deployment(
-            restApiId=rest_api_id,
-            stageName=stage,
-        )
-        return rest_api_id, client.meta.region_name, stage
+        self._aws_client.deploy_rest_api(rest_api_id, stage)
+        return rest_api_id, self._aws_client.region_name, stage
 
 
 class TypedAWSClient(object):
@@ -946,6 +940,20 @@ class TypedAWSClient(object):
             client.delete_method(restApiId=rest_api_id,
                                  resourceId=root_resource['id'],
                                  httpMethod=method)
+
+    def delete_resource_for_api(self, rest_api_id, resource_id):
+        # type: (str, str) -> None
+        client = self._client('apigateway')
+        client.delete_resource(restApiId=rest_api_id,
+                               resourceId=resource_id)
+
+    def deploy_rest_api(self, rest_api_id, stage_name):
+        # type: (str, str) -> None
+        client = self._client('apigateway')
+        client.create_deployment(
+            restApiId=rest_api_id,
+            stageName=stage_name,
+        )
 
     @property
     def region_name(self):
