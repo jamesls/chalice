@@ -15,7 +15,7 @@ import inspect
 import time
 import re
 
-from typing import Any, Tuple, Callable, Optional  # noqa
+from typing import Any, Tuple, Callable, Optional, List  # noqa
 import botocore.session
 import botocore.exceptions
 import virtualenv
@@ -224,10 +224,6 @@ class Deployer(object):
         # a way to have concrete types for botocore clients.
         self._packager = LambdaDeploymentPackager()
         self._aws_client = TypedAWSClient(self._session)
-        self._query = ResourceQuery(
-            self._client('lambda'),
-            self._client('apigateway'),
-        )
 
     def _client(self, service_name):
         # type: (str) -> Any
@@ -255,7 +251,8 @@ class Deployer(object):
         lambda_deploy.deploy(config)
 
         api_gateway_deploy = APIGatewayDeployer(
-            self._query, self._client('apigateway'),
+            self._aws_client,
+            self._client('apigateway'),
             self._client('lambda'))
         rest_api_id, region_name, stage = api_gateway_deploy.deploy(config)
         print (
@@ -569,52 +566,6 @@ class LambdaDeploymentPackager(object):
         shutil.move(tmpzip, deployment_package_filename)
 
 
-class ResourceQuery(object):
-
-    def __init__(self, lambda_client, apigateway_client):
-        # type: (Any, Any) -> None
-        self._lambda_client = lambda_client
-        self._apigateway_client = apigateway_client
-
-    def lambda_function_exists(self, name):
-        # type: (str) -> bool
-        """Check if lambda function exists.
-
-        :type name: str
-        :param name: The name of the lambda function
-
-        :rtype: bool
-        :return: Returns true if a lambda function with the given
-            name exists.
-
-        """
-        try:
-            self._lambda_client.get_function(FunctionName=name)
-        except botocore.exceptions.ClientError as e:
-            error = e.response['Error']
-            if error['Code'] == 'ResourceNotFoundException':
-                return False
-            raise
-        return True
-
-    def get_rest_api_id(self, name):
-        # type: (str) -> Optional[str]
-        """Get rest api id associated with an API name.
-
-        :type name: str
-        :param name: The name of the rest api.
-
-        :rtype: str
-        :return: If the rest api exists, then the restApiId
-            is returned, otherwise None.
-
-        """
-        rest_apis = self._apigateway_client.get_rest_apis()['items']
-        for api in rest_apis:
-            if api['name'] == name:
-                return api['id']
-
-
 class LambdaDeployer(object):
 
     LAMBDA_CREATE_ATTEMPTS = 5
@@ -773,12 +724,12 @@ class LambdaDeployer(object):
 class APIGatewayDeployer(object):
 
     def __init__(self,
-                 resource_query,      # type: ResourceQuery
+                 aws_client,          # type: TypedAWSClient
                  api_gateway_client,  # type: Any
                  lambda_client        # type: Any
                  ):
         # type: (...) -> None
-        self._query = resource_query
+        self._aws_client = aws_client
         self._api_gateway_client = api_gateway_client
         self._lambda_client = lambda_client
 
@@ -786,7 +737,7 @@ class APIGatewayDeployer(object):
         # type: (Config) -> Tuple[str, str, str]
         # Perhaps move this into APIGatewayResourceCreator.
         app_name = config.app_name
-        rest_api_id = self._query.get_rest_api_id(app_name)
+        rest_api_id = self._aws_client.get_rest_api_id(app_name)
         if rest_api_id is None:
             print "Initiating first time deployment..."
             return self._first_time_deploy(config)
@@ -798,7 +749,7 @@ class APIGatewayDeployer(object):
     def _remove_all_resources(self, rest_api_id):
         # type: (str) -> None
         client = self._api_gateway_client
-        all_resources = client.get_resources(restApiId=rest_api_id)['items']
+        all_resources = self._aws_client.get_resources_for_api(rest_api_id)
         first_tier_ids = [r['id'] for r in all_resources
                           if r['path'].count('/') == 1 and r['path'] != '/']
         print "Deleting root resource id"
@@ -809,21 +760,13 @@ class APIGatewayDeployer(object):
         # We can't delete the root resource, but we need to remove all the
         # existing methods otherwise we'll get 4xx from API gateway when we
         # try to add methods to the root resource on a redeploy.
-        self._delete_root_methods(rest_api_id, root_resource)
+        self._aws_client.delete_methods_from_root_resource(
+            rest_api_id, root_resource)
         print "Done deleting existing resources."
-
-    def _delete_root_methods(self, rest_api_id, root_resource):
-        # type: (str, Dict[str, Any]) -> None
-        client = self._api_gateway_client
-        methods = list(root_resource.get('resourceMethods', []))
-        for method in methods:
-            client.delete_method(restApiId=rest_api_id,
-                                 resourceId=root_resource['id'],
-                                 httpMethod=method)
 
     def _lambda_uri(self, lambda_function_arn):
         # type: (str) -> str
-        region_name = self._api_gateway_client.meta.region_name
+        region_name = self._aws_client.region_name
         api_version = '2015-03-31'
         return (
             "arn:aws:apigateway:{region_name}:lambda:path/{api_version}"
@@ -836,15 +779,14 @@ class APIGatewayDeployer(object):
     def _first_time_deploy(self, config):
         # type: (Config) -> Tuple[str, str, str]
         app_name = config.app_name
-        client = self._api_gateway_client
-        rest_api_id = client.create_rest_api(name=app_name)['id']
+        rest_api_id = self._aws_client.create_rest_api(name=app_name)
         return self._create_resources_for_api(config, rest_api_id)
 
     def _create_resources_for_api(self, config, rest_api_id):
         # type: (Config, str) -> Tuple[str, str, str]
         client = self._api_gateway_client
         url_trie = build_url_trie(config.chalice_app.routes)
-        root_resource = client.get_resources(restApiId=rest_api_id)['items'][0]
+        root_resource = self._aws_client.get_root_resource_for_api(rest_api_id)
         assert root_resource['path'] == u'/'
         resource_id = root_resource['id']
         route_builder = APIGatewayResourceCreator(
@@ -961,6 +903,54 @@ class TypedAWSClient(object):
         self.put_role_policy(role_name=name, policy_name=name,
                              policy_document=policy)
         return role_arn
+
+    def get_rest_api_id(self, name):
+        # type: (str) -> Optional[str]
+        """Get rest api id associated with an API name.
+
+        :type name: str
+        :param name: The name of the rest api.
+
+        :rtype: str
+        :return: If the rest api exists, then the restApiId
+            is returned, otherwise None.
+
+        """
+        rest_apis = self._client('apigateway').get_rest_apis()['items']
+        for api in rest_apis:
+            if api['name'] == name:
+                return api['id']
+
+    def create_rest_api(self, name):
+        # type: (str) -> str
+        response = self._client('apigateway').create_rest_api(name=name)
+        return response['id']
+
+    def get_root_resource_for_api(self, rest_api_id):
+        # type: (str) -> str
+        root_resource = self._client('apigateway').get_resources(
+            restApiId=rest_api_id)['items'][0]
+        return root_resource
+
+    def get_resources_for_api(self, rest_api_id):
+        # type: (str) -> List[Dict[str, Any]]
+        client = self._client('apigateway')
+        all_resources = client.get_resources(restApiId=rest_api_id)['items']
+        return all_resources
+
+    def delete_methods_from_root_resource(self, rest_api_id, root_resource):
+        # type: (str, Dict[str, Any]) -> None
+        client = self._client('apigateway')
+        methods = list(root_resource.get('resourceMethods', []))
+        for method in methods:
+            client.delete_method(restApiId=rest_api_id,
+                                 resourceId=root_resource['id'],
+                                 httpMethod=method)
+
+    @property
+    def region_name(self):
+        # type: () -> str
+        return self._client('apigateway').meta.region_name
 
     def _client(self, service_name):
         # type: (str) -> Any
