@@ -137,7 +137,7 @@ def deploy(ctx, project_dir, autogen_policy, profile, stage):
         user_provided_params['profile'] = profile
     config = Config(user_provided_params, config_from_disk, default_params)
     session = botocore.session.Session(profile=config.profile)
-    d = deployer.Deployer(session=session, prompter=click)
+    d = deployer.create_default_deployer(session=session, prompter=click)
     try:
         d.deploy(config)
     except botocore.exceptions.NoRegionError:

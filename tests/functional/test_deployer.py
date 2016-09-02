@@ -8,6 +8,14 @@ import botocore.session
 @fixture(autouse=True)
 def set_region(monkeypatch):
     monkeypatch.setenv('AWS_DEFAULT_REGION', 'us-west-2')
+    monkeypatch.setenv('AWS_ACCESS_KEY_ID', 'foo')
+    monkeypatch.setenv('AWS_SECRET_ACCESS_KEY', 'bar')
+    monkeypatch.delenv('AWS_PROFILE')
+    # Ensure that the existing ~/.aws/{config,credentials} file
+    # don't influence test results.
+    monkeypatch.setenv('AWS_CONFIG_FILE', '/tmp/asdfasdfaf/does/not/exist')
+    monkeypatch.setenv('AWS_SHARED_CREDENTIALS_FILE',
+                       '/tmp/asdfasdfaf/does/not/exist2')
 
 
 @fixture
@@ -64,9 +72,7 @@ def test_no_error_message_printed_on_empty_reqs_file(tmpdir,
     assert err.strip() == ''
 
 
-def test_can_create_deployer_with_no_args(monkeypatch):
-    monkeypatch.setenv('AWS_ACCESS_KEY_ID', 'foo')
-    monkeypatch.setenv('AWS_SECRET_ACCESS_KEY', 'bar')
-    d = deployer.Deployer(session=botocore.session.get_session(),
-                          prompter=deployer.NoPrompt())
+def test_can_create_deployer_from_factory_function(monkeypatch):
+    session = botocore.session.get_session()
+    d = deployer.create_default_deployer(session)
     assert isinstance(d, deployer.Deployer)

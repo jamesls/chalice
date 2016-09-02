@@ -106,6 +106,21 @@ ERROR_MAPPING = (
 )
 
 
+def create_default_deployer(session, prompter=None):
+    # type: (botocore.session.Session, NoPrompt) -> Deployer
+    if prompter is None:
+        prompter = NoPrompt()
+    aws_client = TypedAWSClient(session)
+    api_gateway_deploy = APIGatewayDeployer(
+        aws_client, session.create_client('apigateway'),
+        session.create_client('lambda'))
+
+    packager = LambdaDeploymentPackager()
+    lambda_deploy = LambdaDeployer(
+        aws_client, packager, prompter)
+    return Deployer(api_gateway_deploy, lambda_deploy)
+
+
 def build_url_trie(routes):
     # type: (Dict[str, app.RouteEntry]) -> Dict[str, Any]
     """Create a URL trie based on request routes.
@@ -210,26 +225,10 @@ class NoPrompt(object):
 
 class Deployer(object):
 
-    LAMBDA_CREATE_ATTEMPTS = 5
-    DELAY_TIME = 3
-
-    def __init__(self, session, prompter):
-        # type: (botocore.session.Session, NoPrompt) -> None
-        self._session = session
-        self._prompter = prompter
-        self._client_cache = {}
-        # type: Dict[str, Any]
-        # Note: I'm using "Any" for clients until we figure out
-        # a way to have concrete types for botocore clients.
-        self._packager = LambdaDeploymentPackager()
-        self._aws_client = TypedAWSClient(self._session)
-
-    def _client(self, service_name):
-        # type: (str) -> Any
-        if service_name not in self._client_cache:
-            self._client_cache[service_name] = self._session.create_client(
-                service_name)
-        return self._client_cache[service_name]
+    def __init__(self, apigateway_deploy, lambda_deploy):
+        # type: (APIGatewayDeployer, LambdaDeployer) -> None
+        self._apigateway_deploy = apigateway_deploy
+        self._lambda_deploy = lambda_deploy
 
     def deploy(self, config):
         # type: (Config) -> str
@@ -244,16 +243,9 @@ class Deployer(object):
 
         """
         validate_configuration(config)
-        lambda_deploy = LambdaDeployer(
-            self._aws_client, self._packager, self._prompter
-        )
-        lambda_deploy.deploy(config)
-
-        api_gateway_deploy = APIGatewayDeployer(
-            self._aws_client,
-            self._client('apigateway'),
-            self._client('lambda'))
-        rest_api_id, region_name, stage = api_gateway_deploy.deploy(config)
+        self._lambda_deploy.deploy(config)
+        rest_api_id, region_name, stage = self._apigateway_deploy.deploy(
+            config)
         print (
             "https://{api_id}.execute-api.{region}.amazonaws.com/{stage}/"
             .format(api_id=rest_api_id, region=region_name, stage=stage)
