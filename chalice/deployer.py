@@ -14,7 +14,7 @@ import hashlib
 import inspect
 import re
 
-from typing import Any, Tuple, Callable, Optional, List  # noqa
+from typing import Any, Tuple, Callable, Optional, List, IO  # noqa
 import botocore.session  # noqa
 import virtualenv
 
@@ -116,8 +116,9 @@ def create_default_deployer(session, prompter=None):
         session.create_client('lambda'))
 
     packager = LambdaDeploymentPackager()
+    osutils = OSUtils()
     lambda_deploy = LambdaDeployer(
-        aws_client, packager, prompter)
+        aws_client, packager, prompter, osutils)
     return Deployer(api_gateway_deploy, lambda_deploy)
 
 
@@ -231,7 +232,7 @@ class Deployer(object):
         self._lambda_deploy = lambda_deploy
 
     def deploy(self, config):
-        # type: (Config) -> str
+        # type: (Config) -> Tuple[str, str, str]
         """Deploy chalice application to AWS.
 
         :type config: dict
@@ -250,6 +251,7 @@ class Deployer(object):
             "https://{api_id}.execute-api.{region}.amazonaws.com/{stage}/"
             .format(api_id=rest_api_id, region=region_name, stage=stage)
         )
+        return rest_api_id, region_name, stage
 
 
 class APIGatewayResourceCreator(object):
@@ -559,14 +561,17 @@ class LambdaDeploymentPackager(object):
 
 class LambdaDeployer(object):
 
-    LAMBDA_CREATE_ATTEMPTS = 5
-    DELAY_TIME = 3
-
-    def __init__(self, aws_client, packager, prompter):
-        # type: (TypedAWSClient, LambdaDeploymentPackager, NoPrompt) -> None
+    def __init__(self,
+                 aws_client,   # type: TypedAWSClient
+                 packager,     # type: LambdaDeploymentPackager
+                 prompter,     # type: NoPrompt
+                 osutils,      # type: OSUtils
+                 ):
+        # type: (...) -> None
         self._aws_client = aws_client
         self._packager = packager
         self._prompter = prompter
+        self._osutils = osutils
 
     def deploy(self, config):
         # type: (Config) -> None
@@ -675,17 +680,17 @@ class LambdaDeployer(object):
         packager = self._packager
         deployment_package_filename = packager.deployment_package_filename(
             project_dir)
-        if os.path.isfile(deployment_package_filename):
+        if self._osutils.file_exists(deployment_package_filename):
             packager.inject_latest_app(deployment_package_filename,
                                        project_dir)
         else:
             deployment_package_filename = packager.create_deployment_package(
                 project_dir)
-        with open(deployment_package_filename, 'rb') as f:
-            zip_contents = f.read()
-            print "Sending changes to lambda."
-            self._aws_client.update_function_code(config.app_name,
-                                                  zip_contents)
+        zip_contents = self._osutils.get_file_contents(
+            deployment_package_filename, binary=True)
+        print "Sending changes to lambda."
+        self._aws_client.update_function_code(config.app_name,
+                                              zip_contents)
 
     def _write_config_to_disk(self, config):
         # type: (Config) -> None
@@ -797,3 +802,32 @@ class APIGatewayDeployer(object):
         print "Deploying to:", stage
         self._aws_client.deploy_rest_api(rest_api_id, stage)
         return rest_api_id, self._aws_client.region_name, stage
+
+
+class OSUtils(object):
+    def open(self, filename, mode):
+        # type: (str, str) -> IO
+        return open(filename, mode)
+
+    def remove_file(self, filename):
+        # type: (str) -> None
+        """Remove a file, noop if file does not exist."""
+        # Unlike os.remove, if the file does not exist,
+        # then this method does nothing.
+        try:
+            os.remove(filename)
+        except OSError:
+            pass
+
+    def file_exists(self, filename):
+        # type: (str) -> bool
+        return os.path.isfile(filename)
+
+    def get_file_contents(self, filename, binary=True):
+        # type: (str, bool) -> str
+        if binary:
+            mode = 'rb'
+        else:
+            mode = 'r'
+        with open(filename, mode) as f:
+            return f.read()

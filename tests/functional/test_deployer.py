@@ -1,8 +1,9 @@
 import zipfile
 from pytest import fixture
 
-from chalice import deployer
 import botocore.session
+
+from chalice import deployer
 
 
 @fixture(autouse=True)
@@ -72,7 +73,8 @@ def test_no_error_message_printed_on_empty_reqs_file(tmpdir,
     assert err.strip() == ''
 
 
-def test_can_create_deployer_from_factory_function(monkeypatch):
+def test_can_create_deployer_from_factory_function():
     session = botocore.session.get_session()
     d = deployer.create_default_deployer(session)
     assert isinstance(d, deployer.Deployer)
+
