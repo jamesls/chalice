@@ -1,3 +1,18 @@
+"""Simplified AWS client.
+
+This module abstracts the botocore session and clients
+to provide a simpler interface.  This interface only
+contains the API calls needed to work with AWS services
+used by chalice.
+
+The interface provided can range from a direct 1-1 mapping
+of a method to a method on a botocore client all the way up
+to combining API calls across multiple AWS services.
+
+As a side benefit, I can also add type annotations to
+this class to get improved type checking across chalice.
+
+"""
 import time
 import json
 
