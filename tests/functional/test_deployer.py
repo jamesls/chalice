@@ -78,3 +78,17 @@ def test_can_create_deployer_from_factory_function():
     d = deployer.create_default_deployer(session)
     assert isinstance(d, deployer.Deployer)
 
+def test_osutils_proxies_os_functions(tmpdir):
+    appdir = _create_app_structure(tmpdir)
+    appdir.join('app.py').write(b'hello')
+
+    osutils = deployer.OSUtils()
+
+    app_file = str(appdir.join('app.py'))
+    assert osutils.file_exists(app_file)
+    assert osutils.get_file_contents(app_file) == b'hello'
+    assert osutils.open(app_file, 'rb').read() == b'hello'
+    osutils.remove_file(app_file)
+    # Removing again doesn't raise an error.
+    osutils.remove_file(app_file)
+    assert not osutils.file_exists(app_file)
