@@ -26,9 +26,10 @@ class TypedAWSClient(object):
     LAMBDA_CREATE_ATTEMPTS = 5
     DELAY_TIME = 3
 
-    def __init__(self, session):
-        # type: (botocore.session.Session) -> None
+    def __init__(self, session, sleep=time.sleep):
+        # type: (botocore.session.Session, time.sleep) -> None
         self._session = session
+        self._sleep = sleep
         self._client_cache = {}
         # type: Dict[str, Any]
 
@@ -65,7 +66,7 @@ class TypedAWSClient(object):
                     # InvalidParameterValueException, it's because
                     # the role we just created can't be used by
                     # Lambda.
-                    time.sleep(self.DELAY_TIME)
+                    self._sleep(self.DELAY_TIME)
                     attempts += 1
                     if attempts >= self.LAMBDA_CREATE_ATTEMPTS:
                         raise

@@ -1,5 +1,8 @@
 import pytest
+import datetime
 from pytest import fixture
+import time
+import mock
 
 import botocore.session
 from botocore.stub import Stubber
@@ -174,4 +177,148 @@ def test_rest_api_does_not_exist(stubbed_session):
     stubbed_session.activate_stubs()
     awsclient = TypedAWSClient(stubbed_session)
     assert awsclient.get_rest_api_id('myappname') is None
+    stubbed_session.verify_stubs()
+
+
+def test_region_name_is_exposed(stubbed_session):
+    assert TypedAWSClient(stubbed_session).region_name == 'us-west-2'
+
+
+def test_deploy_rest_api(stubbed_session):
+    stub_client = stubbed_session.stub('apigateway')
+    stub_client.create_deployment(
+        restApiId='api_id', stageName='stage').returns({})
+
+    stubbed_session.activate_stubs()
+    awsclient = TypedAWSClient(stubbed_session)
+    awsclient.deploy_rest_api('api_id', 'stage')
+    stubbed_session.verify_stubs()
+
+
+def test_delete_resource_for_api(stubbed_session):
+    stubbed_session.stub('apigateway').delete_resource(
+        restApiId='api_id', resourceId='resource_id').returns({})
+    stubbed_session.activate_stubs()
+    awsclient = TypedAWSClient(stubbed_session)
+    awsclient.delete_resource_for_api('api_id', 'resource_id')
+    stubbed_session.verify_stubs()
+
+
+def test_create_rest_api(stubbed_session):
+    stubbed_session.stub('apigateway').create_rest_api(
+        name='name').returns({'id': 'rest_api_id'})
+    stubbed_session.activate_stubs()
+    awsclient = TypedAWSClient(stubbed_session)
+    assert awsclient.create_rest_api('name') == 'rest_api_id'
+    stubbed_session.verify_stubs()
+
+
+def test_update_function_code(stubbed_session):
+    stubbed_session.stub('lambda').update_function_code(
+        FunctionName='name', ZipFile=b'foo').returns({})
+    stubbed_session.activate_stubs()
+    awsclient = TypedAWSClient(stubbed_session)
+    awsclient.update_function_code('name', b'foo')
+    stubbed_session.verify_stubs()
+
+
+def test_get_role_arn_for_name_found(stubbed_session):
+    # Need len(20) to pass param validation.
+    good_arn = 'good_arn' * 3
+    bad_arn = 'bad_arn' * 3
+    role_id = 'abcd' * 4
+    today = datetime.datetime.today()
+    stubbed_session.stub('iam').list_roles().returns({
+        'Roles': [
+            {'RoleName': 'No', 'Arn': bad_arn, 'Path': '/',
+             'RoleId': role_id, 'CreateDate': today},
+            {'RoleName': 'Yes', 'Arn': good_arn,'Path': '/',
+             'RoleId': role_id, 'CreateDate': today},
+            {'RoleName': 'No2', 'Arn': bad_arn, 'Path': '/',
+             'RoleId': role_id, 'CreateDate': today},
+        ]
+    })
+    stubbed_session.activate_stubs()
+    awsclient = TypedAWSClient(stubbed_session)
+    assert awsclient.get_role_arn_for_name(name='Yes') == good_arn
+    stubbed_session.verify_stubs()
+
+
+def test_got_role_arn_not_found_raises_value_error(stubbed_session):
+    bad_arn = 'bad_arn' * 3
+    role_id = 'abcd' * 4
+    today = datetime.datetime.today()
+    stubbed_session.stub('iam').list_roles().returns({
+        'Roles': [
+            {'RoleName': 'No', 'Arn': bad_arn, 'Path': '/',
+             'RoleId': role_id, 'CreateDate': today},
+            {'RoleName': 'No2', 'Arn': bad_arn, 'Path': '/',
+             'RoleId': role_id, 'CreateDate': today},
+        ]
+    })
+    stubbed_session.activate_stubs()
+    awsclient = TypedAWSClient(stubbed_session)
+    with pytest.raises(ValueError):
+        awsclient.get_role_arn_for_name(name='Yes')
+    stubbed_session.verify_stubs()
+
+
+def test_create_function_succeeds_first_try(stubbed_session):
+    stubbed_session.stub('lambda').create_function(
+        FunctionName='name',
+        Runtime='python2.7',
+        Code={'ZipFile': b'foo'},
+        Handler='app.app',
+        Role='myarn',
+        Timeout=60,
+    ).returns({'FunctionArn': 'arn:12345:name'})
+    stubbed_session.activate_stubs()
+    awsclient = TypedAWSClient(stubbed_session)
+    assert awsclient.create_function(
+        'name', 'myarn', b'foo') == 'arn:12345:name'
+    stubbed_session.verify_stubs()
+
+
+def test_create_function_is_retried_and_succeeds(stubbed_session):
+    kwargs = {
+        'FunctionName': 'name',
+        'Runtime': 'python2.7',
+        'Code': {'ZipFile': b'foo'},
+        'Handler': 'app.app',
+        'Role': 'myarn',
+        'Timeout': 60,
+    }
+    stubbed_session.stub('lambda').create_function(
+        **kwargs).raises_error(
+            error_code='InvalidParameterValueException', message='')
+    stubbed_session.stub('lambda').create_function(
+        **kwargs).raises_error(
+            error_code='InvalidParameterValueException', message='')
+    stubbed_session.stub('lambda').create_function(
+        **kwargs).returns({'FunctionArn': 'arn:12345:name'})
+    stubbed_session.activate_stubs()
+    awsclient = TypedAWSClient(stubbed_session, mock.Mock(spec=time.sleep))
+    assert awsclient.create_function(
+        'name', 'myarn', b'foo') == 'arn:12345:name'
+    stubbed_session.verify_stubs()
+
+
+def test_create_function_fails_after_max_retries(stubbed_session):
+    kwargs = {
+        'FunctionName': 'name',
+        'Runtime': 'python2.7',
+        'Code': {'ZipFile': b'foo'},
+        'Handler': 'app.app',
+        'Role': 'myarn',
+        'Timeout': 60,
+    }
+    for _ in range(5):
+        stubbed_session.stub('lambda').create_function(
+            **kwargs).raises_error(
+                error_code='InvalidParameterValueException', message='')
+
+    stubbed_session.activate_stubs()
+    awsclient = TypedAWSClient(stubbed_session, mock.Mock(spec=time.sleep))
+    with pytest.raises(botocore.exceptions.ClientError):
+        awsclient.create_function('name', 'myarn', b'foo')
     stubbed_session.verify_stubs()
