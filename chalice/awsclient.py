@@ -18,7 +18,7 @@ import json
 
 import botocore.session
 import botocore.exceptions
-from typing import Any, Optional  # noqa
+from typing import Any, Optional, Dict  # noqa
 
 
 class TypedAWSClient(object):
