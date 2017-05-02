@@ -1,8 +1,9 @@
 import copy
 
-from typing import Any, List, Dict  # noqa
+from typing import Any, List, Dict, Optional  # noqa
 
 from chalice.app import Chalice, RouteEntry, Authorizer  # noqa
+from chalice.app import ChaliceAuthorizer
 
 
 class SwaggerGenerator(object):
@@ -23,10 +24,10 @@ class SwaggerGenerator(object):
         }
     }  # type: Dict[str, Any]
 
-    def __init__(self, region, lambda_arn):
-        # type: (str, str) -> None
+    def __init__(self, region, deployed_resources):
+        # type: (str, Dict[str, Any]) -> None
         self._region = region
-        self._lambda_arn = lambda_arn
+        self._deployed_resources = deployed_resources
 
     def generate_swagger(self, app):
         # type: (Chalice) -> Dict[str, Any]
@@ -56,7 +57,23 @@ class SwaggerGenerator(object):
 
     def _generate_security_from_auth_obj(self, api_config, authorizer):
         # type: (Dict[str, Any], Authorizer) -> None
-        config = authorizer.to_swagger()
+        if isinstance(authorizer, ChaliceAuthorizer):
+            arn = self._deployed_resources['lambda_functions'].values()[0]
+            config = {
+                # TODO: Make all this configurable like you can do
+                # with CustomAuthorizer.
+                'in': 'header',
+                'type': 'apiKey',
+                'name': 'Authorization',
+                'x-amazon-apigateway-authtype': 'custom',
+                'x-amazon-apigateway-authorizer': {
+                    'type': 'token',
+                    'authorizerUri': self._uri(arn),
+                    'authorizerResultTtlInSeconds': 300,
+                }
+            }
+        else:
+            config = authorizer.to_swagger()
         api_config.setdefault(
             'securityDefinitions', {})[authorizer.name] = config
 
@@ -129,7 +146,7 @@ class SwaggerGenerator(object):
             current['security'] = [{'api_key': []}]
         if view.authorizer_name:
             current['security'] = [{view.authorizer_name: []}]
-        if view.authorizer:
+        if view.authorizer is not None:
             current['security'] = [{view.authorizer.name: []}]
         return current
 
@@ -145,11 +162,13 @@ class SwaggerGenerator(object):
         }
         return responses
 
-    def _uri(self):
-        # type: () -> Any
+    def _uri(self, lambda_arn=None):
+        # type: (Optional[str]) -> Any
+        if lambda_arn is None:
+            lambda_arn = self._deployed_resources['api_handler_arn']
         return ('arn:aws:apigateway:{region}:lambda:path/2015-03-31'
                 '/functions/{lambda_arn}/invocations').format(
-                    region=self._region, lambda_arn=self._lambda_arn)
+                    region=self._region, lambda_arn=lambda_arn)
 
     def _generate_apig_integ(self, view):
         # type: (RouteEntry) -> Dict[str, Any]
@@ -219,9 +238,8 @@ class SwaggerGenerator(object):
 
 
 class CFNSwaggerGenerator(SwaggerGenerator):
-    def _uri(self):
-        # type: () -> Any
-        # TODO: Does this have to be return type Any?
+    def _uri(self, lambda_arn=None):
+        # type: (Optional[str]) -> Any
         return {
             'Fn::Sub': (
                 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31'

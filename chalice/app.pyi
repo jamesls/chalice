@@ -105,12 +105,25 @@ class Chalice(object):
     current_request = ... # type: Request
     debug = ... # type: bool
     authorizers = ... # type: Dict[str, Dict[str, Any]]
+    builtin_auths = ... # type: List[BuiltinAuth]
 
     def __init__(self, app_name: str) -> None: ...
 
+    def authorizer(self, name: str, **kwargs: Any) -> Callable[..., Any]: ...
     def route(self, path: str, **kwargs: Any) -> Callable[..., Any]: ...
     def _add_route(self, path: str, view_func: Callable[..., Any], **kwargs: Any) -> None: ...
     def __call__(self, event: Any, context: Any) -> Any: ...
     def _get_view_function_response(self,
                                     view_function: Callable[..., Any],
                                     function_args: List[Any]) -> Response: ...
+
+
+class ChaliceAuthorizer:
+    name = ... # type: str
+    func = ... # type: Callable[..., List[str]]
+    config = ... # type: BuiltinAuth
+
+
+class BuiltinAuth:
+    name = ...  # type: str
+    handler_string = ... # type: str

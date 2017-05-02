@@ -111,7 +111,7 @@ def test_api_gateway_deployer_initial_deploy(config_obj):
     lambda_arn = 'arn:aws:lambda:us-west-2:account-id:function:func-name'
 
     d = APIGatewayDeployer(aws_client)
-    d.deploy(config_obj, None, lambda_arn)
+    d.deploy(config_obj, None, {'api_handler_arn': lambda_arn})
 
     # mock.ANY because we don't want to test the contents of the swagger
     # doc.  That's tested exhaustively elsewhere.
@@ -134,12 +134,12 @@ def test_api_gateway_deployer_redeploy_api(config_obj):
     # The rest_api_id does not exist which will trigger
     # the initial import
     deployed = DeployedResources(
-        None, None, None, 'existing-id', 'dev', None, None)
+        None, None, None, 'existing-id', 'dev', None, None, {})
     aws_client.rest_api_exists.return_value = True
     lambda_arn = 'arn:aws:lambda:us-west-2:account-id:function:func-name'
 
     d = APIGatewayDeployer(aws_client)
-    d.deploy(config_obj, deployed, lambda_arn)
+    d.deploy(config_obj, deployed, {'api_handler_arn': lambda_arn})
 
     aws_client.update_api_from_swagger.assert_called_with('existing-id',
                                                           mock.ANY)
@@ -158,7 +158,7 @@ def test_api_gateway_deployer_delete(config_obj):
 
     rest_api_id = 'abcdef1234'
     deployed = DeployedResources(
-        None, None, None, rest_api_id, 'dev', None, None)
+        None, None, None, rest_api_id, 'dev', None, None, {})
     aws_client.rest_api_exists.return_value = True
 
     d = APIGatewayDeployer(aws_client)
@@ -172,7 +172,7 @@ def test_api_gateway_deployer_delete_already_deleted(capsys):
     aws_client.delete_rest_api.side_effect = ResourceDoesNotExistError(
         rest_api_id)
     deployed = DeployedResources(
-        None, None, None, rest_api_id, 'dev', None, None)
+        None, None, None, rest_api_id, 'dev', None, None, {})
     aws_client.rest_api_exists.return_value = True
     d = APIGatewayDeployer(aws_client)
     d.delete(deployed)
@@ -355,7 +355,14 @@ def test_can_deploy_apig_and_lambda(sample_app):
         project_dir='.')
     d.deploy(cfg)
     lambda_deploy.deploy.assert_called_with(cfg, None, 'dev')
-    apig_deploy.deploy.assert_called_with(cfg, None, 'my_lambda_arn')
+    apig_deploy.deploy.assert_called_with(cfg, None, {
+        'rest_api_id': 'api_id',
+        'chalice_version': chalice_version,
+        'region': 'region',
+        'api_gateway_stage': 'stage',
+        'api_handler_name': 'lambda_function',
+        'api_handler_arn': 'my_lambda_arn', 'backend': 'api'
+    })
 
 
 def test_deployer_returns_deployed_resources(sample_app):
@@ -470,7 +477,7 @@ def test_lambda_deployer_repeated_deploy(app_policy, sample_app):
     lambda_function_name = 'lambda_function_name'
     deployed = DeployedResources(
         'api', 'api_handler_arn', lambda_function_name,
-        None, 'dev', None, None)
+        None, 'dev', None, None, {})
     d.deploy(cfg, deployed, 'dev')
 
     # Should result in injecting the latest app code.
@@ -498,7 +505,7 @@ def test_lambda_deployer_delete():
     lambda_function_name = 'lambda_name'
     deployed = DeployedResources(
         'api', 'api_handler_arn/lambda_name', lambda_function_name,
-        None, 'dev', None, None)
+        None, 'dev', None, None, {})
     d = LambdaDeployer(
         aws_client, None, CustomConfirmPrompt(True), None, None)
     d.delete(deployed)
@@ -516,7 +523,7 @@ def test_lambda_deployer_delete_already_deleted(capsys):
         lambda_function_name)
     deployed = DeployedResources(
         'api', 'api_handler_arn/lambda_name', lambda_function_name,
-        None, 'dev', None, None)
+        None, 'dev', None, None, {})
     d = LambdaDeployer(
         aws_client, None, NoPrompt(), None, None)
     d.delete(deployed)
@@ -554,7 +561,7 @@ def test_prompted_on_runtime_change_can_reject_change(app_policy, sample_app):
     lambda_function_name = 'lambda_function_name'
     deployed = DeployedResources(
         'api', 'api_handler_arn', lambda_function_name,
-        None, 'dev', None, None)
+        None, 'dev', None, None, {})
     with pytest.raises(RuntimeError):
         d.deploy(cfg, deployed, 'dev')
 
@@ -811,7 +818,7 @@ class TestLambdaUpdateDeploymentWithConfigurations(object):
 
         self.deployed_resources = DeployedResources(
             'api', 'api_handler_arn', self.lambda_function_name,
-            None, 'dev', None, None)
+            None, 'dev', None, None, {})
 
     def test_lambda_deployer_defaults(self, sample_app):
         cfg = Config.create(

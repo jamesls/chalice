@@ -69,6 +69,7 @@ class TypedAWSClient(object):
                         role_arn,                    # type: str
                         zip_contents,                # type: str
                         runtime,                     # type: str
+                        handler='app.app',           # type: str
                         environment_variables=None,  # type: _STR_MAP
                         tags=None,                   # type: _STR_MAP
                         timeout=None,                # type: _OPT_INT
@@ -79,7 +80,7 @@ class TypedAWSClient(object):
             'FunctionName': function_name,
             'Runtime': runtime,
             'Code': {'ZipFile': zip_contents},
-            'Handler': 'app.app',
+            'Handler': handler,
             'Role': role_arn,
         }  # type: Dict[str, Any]
         if environment_variables is not None:
@@ -422,6 +423,32 @@ class TypedAWSClient(object):
         source_arn = self._build_source_arn_str(region_name, account_id,
                                                 rest_api_id)
         client.add_permission(
+            Action='lambda:InvokeFunction',
+            FunctionName=function_name,
+            StatementId=random_id,
+            Principal='apigateway.amazonaws.com',
+            SourceArn=source_arn,
+        )
+
+    def add_permission_for_authorizer(self, rest_api_id, function_arn,
+                                      random_id):
+        # type: (str, str, str) -> None
+        client = self._client('apigateway')
+        authorizers = client.get_authorizers(restApiId=rest_api_id)
+        for authorizer in authorizers['items']:
+            if function_arn in authorizer['authorizerUri']:
+                authorizer_id = authorizer['id']
+                break
+        else:
+            raise RuntimeError("Unable to find authorizer associated "
+                               "with function ARN: %s" % function_arn)
+        parts = function_arn.split(':')
+        region_name = parts[3]
+        account_id = parts[4]
+        function_name = parts[-1]
+        source_arn = ("arn:aws:execute-api:%s:%s:%s/authorizers/%s" %
+                      (region_name, account_id, rest_api_id, authorizer_id))
+        self._client('lambda').add_permission(
             Action='lambda:InvokeFunction',
             FunctionName=function_name,
             StatementId=random_id,

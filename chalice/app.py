@@ -412,6 +412,7 @@ class Chalice(object):
         self.configure_logs = configure_logs
         self.log = logging.getLogger(self.app_name)
         self._authorizers = {}
+        self.builtin_auths = []
         if self.configure_logs:
             self._configure_logging()
 
@@ -455,6 +456,14 @@ class Chalice(object):
             'auth_type': auth_type,
             'provider_arns': provider_arns,
         }
+
+    def authorizer(self, name, **kwargs):
+        def _register_authorizer(auth_func):
+            auth_config = BuiltinAuth(name, 'app.%s' % auth_func.func_name)
+            # Do we even need the builtin_auths attr?
+            self.builtin_auths.append(auth_config)
+            return ChaliceAuthorizer(name, auth_func, auth_config)
+        return _register_authorizer
 
     def route(self, path, **kwargs):
         def _register_view(view_func):
@@ -615,3 +624,55 @@ class Chalice(object):
         for name, value in cors.get_access_control_headers().items():
             if name not in response.headers:
                 response.headers[name] = value
+
+
+class ChaliceAuthorizer(object):
+    def __init__(self, name, func, config):
+        self.name = name
+        self.func = func
+        self.config = config
+
+    def __call__(self, event, content):
+        auth_request = self._transform_event(event)
+        result = self.func(auth_request)
+        return self._policy_from_result(result)
+
+    def _transform_event(self, event):
+        return _AuthRequest(event['type'],
+                            event['authorizationToken'],
+                            event['methodArn'])
+
+    def _policy_from_result(self, result):
+        policy = {
+            "policyDocument": {
+                "Version": "2012-10-17",
+                "Statement": [
+                    {
+                        "Action": "execute-api:Invoke",
+                        "Resource": result,
+                        "Effect": "Allow"
+                    }
+                ]
+            },
+            "context": {
+                "bool": True,
+                "number": 1,
+                "key": "value"
+            },
+            "principalId": "user|a1b2c3d4"
+        }
+        return policy
+
+
+class _AuthRequest(object):
+    def __init__(self, auth_type, token, method_arn):
+        self.auth_type = auth_type
+        self.token = token
+        self.method_arn = method_arn
+
+
+class BuiltinAuth(object):
+    def __init__(self, name, handler_string):
+        # We'd also support all the misc config options you can set.
+        self.name = name
+        self.handler_string = handler_string
