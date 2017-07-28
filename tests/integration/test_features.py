@@ -122,10 +122,12 @@ def _deploy_with_retries(deployer, config, max_attempts=10):
             # API Gateway aggressively throttles deployments.
             # If we run into this case, we just wait and try
             # again.
-            error_code = e.original_error.response['Error']['Code']
-            if error_code != 'TooManyRequestsException':
-                raise
-            time.sleep(20)
+            if hasattr(e.original_error, 'response'):
+                error_code = e.original_error.response['Error']['Code']
+                if error_code == 'TooManyRequestsException':
+                    time.sleep(20)
+                    continue
+            raise
     raise RuntimeError("Failed to deploy app after %s attempts" % max_attempts)
 
 
