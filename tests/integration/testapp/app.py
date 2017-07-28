@@ -10,7 +10,7 @@ except:
 # This app exercises all the major features of chalice
 # and helps prevent regressions.
 
-app = Chalice(app_name='smoketestapp')
+app = Chalice(app_name='%s')
 app.api.binary_types.append('application/binary')
 
 

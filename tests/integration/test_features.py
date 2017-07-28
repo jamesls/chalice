@@ -3,6 +3,7 @@ import os
 import sys
 import time
 import shutil
+import uuid
 
 import botocore.session
 import pytest
@@ -65,7 +66,7 @@ class SmokeTestApplication(object):
         shutil.move(original_app_py, original_app_py + '.bak')
         shutil.copy(new_file, original_app_py)
         self._clear_app_import()
-        _deploy_app(self.app_dir)
+        _deploy_app(self.app_dir, self.app_name)
         self._has_redeployed = True
         # Give it settling time before running more tests.
         time.sleep(self._REDEPLOY_SLEEP)
@@ -80,13 +81,35 @@ class SmokeTestApplication(object):
 @pytest.fixture(scope='module')
 def smoke_test_app(tmpdir_factory):
     tmpdir = str(tmpdir_factory.mktemp('smoketestapp'))
-    OSUtils().copytree(PROJECT_DIR, tmpdir)
-    application = _deploy_app(tmpdir)
+    osutils = OSUtils()
+    osutils.copytree(PROJECT_DIR, tmpdir)
+    app_name = _fill_in_app_name(osutils, tmpdir)
+    application = _deploy_app(tmpdir, app_name)
     yield application
     _delete_app(application)
 
 
-def _deploy_app(temp_dirname):
+def _fill_in_app_name(osutils, tmpdir):
+    # In order to avoid hardcoded app names so that
+    # the integration tests can be run in parallel with other
+    # python versions, we'll generate a random name and place it
+    # in the app.py file.
+    app_name = 'smoketest-%s%s' % uuid.uuid4()
+    app_py = os.path.join(tmpdir, 'app.py')
+    config_json = os.path.join(tmpdir, '.chalice', 'config.json')
+
+    app_contents = osutils.get_file_contents(app_py, binary=False)
+    osutils.set_file_contents(app_py, app_contents % app_name, binary=False)
+
+    config_contents = json.loads(
+        osutils.get_file_contents(config_json, binary=False))
+    config_contents['app_name'] = app_name
+    osutils.set_file_contents(
+        config_json, json.dumps(config_contents, indent=2), binary=False)
+    return app_name
+
+
+def _deploy_app(temp_dirname, app_name):
     factory = CLIFactory(temp_dirname)
     config = factory.create_config_obj(
         chalice_stage_name='dev',
@@ -103,7 +126,7 @@ def _deploy_app(temp_dirname):
         url=url,
         deployed_values=deployed,
         stage_name='dev',
-        app_name='smoketestapp',
+        app_name=app_name,
         app_dir=temp_dirname,
     )
     record_deployed_values(

@@ -7,7 +7,7 @@ tests to test behavior on redeploys.
 from chalice import Chalice
 
 
-app = Chalice(app_name='smoketestapp')
+app = Chalice(app_name='%s')
 
 
 # Test an unchanged view, this is the exact
