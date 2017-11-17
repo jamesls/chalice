@@ -359,7 +359,7 @@ class RouteEntry(object):
 
     def __init__(self, view_function, view_name, path, method,
                  api_key_required=None, content_types=None,
-                 cors=False, authorizer=None):
+                 cors=False, authorizer=None, throttle=None):
         self.view_function = view_function
         self.view_name = view_name
         self.uri_pattern = path
@@ -380,6 +380,7 @@ class RouteEntry(object):
             cors = None
         self.cors = cors
         self.authorizer = authorizer
+        self.throttle = throttle
 
     def _parse_view_args(self):
         if '{' not in self.uri_pattern:
@@ -545,6 +546,7 @@ class Chalice(object):
         api_key_required = kwargs.pop('api_key_required', None)
         content_types = kwargs.pop('content_types', ['application/json'])
         cors = kwargs.pop('cors', False)
+        throttle = kwargs.pop('throttle', None)
         if not isinstance(content_types, list):
             raise ValueError('In view function "%s", the content_types '
                              'value must be a list, not %s: %s'
@@ -564,7 +566,7 @@ class Chalice(object):
                 )
             entry = RouteEntry(view_func, name, path, method,
                                api_key_required, content_types,
-                               cors, authorizer)
+                               cors, authorizer, throttle)
             self.routes[path][method] = entry
 
     def __call__(self, event, context):

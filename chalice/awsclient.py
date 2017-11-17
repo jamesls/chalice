@@ -27,7 +27,7 @@ import botocore.session  # noqa
 from botocore.exceptions import ClientError
 from botocore.vendored.requests import ConnectionError as \
     RequestsConnectionError
-from typing import Any, Optional, Dict, Callable, List, Iterator  # noqa
+from typing import Any, Optional, Dict, Callable, List, Iterator, Tuple  # noqa
 
 from chalice.constants import DEFAULT_STAGE_NAME
 from chalice.constants import MAX_LAMBDA_DEPLOYMENT_SIZE
@@ -375,6 +375,27 @@ class TypedAWSClient(object):
             restApiId=rest_api_id,
             stageName=api_gateway_stage,
         )
+
+    def add_throttle_for_stage(self, rest_api_id, api_gateway_stage,
+                               throttle_config):
+        # type: (str, str, List[Tuple[str, str, int, int]]) -> None
+        client = self._client('apigateway')
+        patch_operations = []
+        for config in throttle_config:
+            patch, method, rate, burst = config
+            base_path = '%s/%s' % (patch, method)
+            patch_operations.append({
+                'op': 'replace',
+                'path': '%s/throttling/rateLimit' % base_path,
+                'value': str(rate),
+            })
+            patch_operations.append({
+                'op': 'replace',
+                'path': '%s/throttling/burstLimit' % base_path,
+                'value': str(burst),
+            })
+        client.update_stage(restApiId=rest_api_id, stageName=api_gateway_stage,
+                            patchOperations=patch_operations)
 
     def add_permission_for_apigateway_if_needed(self, function_name,
                                                 region_name, account_id,

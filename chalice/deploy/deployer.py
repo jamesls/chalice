@@ -820,6 +820,8 @@ class APIGatewayDeployer(object):
         api_gateway_stage = config.api_gateway_stage
         self._deploy_api_to_stage(rest_api_id, api_gateway_stage,
                                   deployed_resources)
+        self._update_stage_config(rest_api_id, api_gateway_stage,
+                                  config.chalice_app.routes)
         return rest_api_id, self._aws_client.region_name, api_gateway_stage
 
     def _create_resources_for_api(self, config, rest_api_id,
@@ -834,7 +836,27 @@ class APIGatewayDeployer(object):
         self._deploy_api_to_stage(
             rest_api_id, api_gateway_stage,
             deployed_resources)
+        self._update_stage_config(
+            rest_api_id, api_gateway_stage,
+            config.chalice_app.routes
+        )
         return rest_api_id, self._aws_client.region_name, api_gateway_stage
+
+    def _update_stage_config(self, rest_api_id, api_gateway_stage, routes):
+        # type: (str, str, Dict[str, Dict[str, app.RouteEntry]]) -> None
+        throttle_config = []
+        for path, methods_mapping in routes.items():
+            for http_method, route_entry in methods_mapping.items():
+                if route_entry.throttle is None:
+                    continue
+                throttle = route_entry.throttle
+                throttle_config.append(
+                    (path, http_method, throttle[0], throttle[1])
+                )
+        if throttle_config:
+            self._aws_client.add_throttle_for_stage(
+                rest_api_id, api_gateway_stage, throttle_config,
+            )
 
     def _deploy_api_to_stage(self, rest_api_id, api_gateway_stage,
                              deployed_resources):
