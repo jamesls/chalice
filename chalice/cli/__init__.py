@@ -7,6 +7,7 @@ import logging
 import os
 import sys
 import tempfile
+import traceback
 import shutil
 
 import botocore.exceptions
@@ -327,6 +328,8 @@ def main():
                    "environment variable or set the "
                    "region value in our ~/.aws/config file.", err=True)
         return 2
-    except Exception as e:
-        click.echo(str(e), err=True)
+    except Exception:
+        click.echo("An error occured when running the command: %s\n" % (
+            ' '.join(['chalice'] + sys.argv[1:])), err=True)
+        traceback.print_exc()
         return 2
