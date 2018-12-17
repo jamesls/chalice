@@ -506,7 +506,10 @@ class Chalice(object):
             level = logging.ERROR
         self.log.setLevel(level)
 
-    def authorizer(self, name=None, **kwargs):
+    def register_blueprint(self, blueprint, **kwargs):
+        blueprint.register_to_app(self, kwargs)
+
+    def authorizer(self, name=None, _handler_module='app', **kwargs):
         def _register_authorizer(auth_func):
             auth_name = name
             if auth_name is None:
@@ -519,7 +522,7 @@ class Chalice(object):
                     'arguments: %s' % ', '.join(list(kwargs)))
             auth_config = BuiltinAuthConfig(
                 name=auth_name,
-                handler_string='app.%s' % auth_func.__name__,
+                handler_string='%s.%s' % (_handler_module, auth_func.__name__),
                 ttl_seconds=ttl_seconds,
                 execution_role=execution_role,
             )
@@ -528,7 +531,8 @@ class Chalice(object):
         return _register_authorizer
 
     def on_s3_event(self, bucket, events=None,
-                    prefix=None, suffix=None, name=None):
+                    prefix=None, suffix=None, name=None,
+                    _handler_module='app'):
         def _register_s3_event(event_func):
             handler_name = name
             if handler_name is None:
@@ -542,34 +546,38 @@ class Chalice(object):
                 events=trigger_events,
                 prefix=prefix,
                 suffix=suffix,
-                handler_string='app.%s' % event_func.__name__,
+                handler_string='%s.%s' % (_handler_module,
+                                          event_func.__name__),
             )
             self.event_sources.append(s3_event)
             return EventSourceHandler(event_func, S3Event)
         return _register_s3_event
 
-    def on_sns_message(self, topic, name=None):
+    def on_sns_message(self, topic, name=None, _handler_module='app'):
         def _register_sns_message(event_func):
             handler_name = name
             if handler_name is None:
                 handler_name = event_func.__name__
             sns_config = SNSEventConfig(
                 name=handler_name,
-                handler_string='app.%s' % event_func.__name__,
+                handler_string='%s.%s' % (_handler_module,
+                                          event_func.__name__),
                 topic=topic,
             )
             self.event_sources.append(sns_config)
             return EventSourceHandler(event_func, SNSEvent)
         return _register_sns_message
 
-    def on_sqs_message(self, queue, batch_size=1, name=None):
+    def on_sqs_message(self, queue, batch_size=1, name=None,
+                       _handler_module='app'):
         def _register_sqs_message(event_func):
             handler_name = name
             if handler_name is None:
                 handler_name = event_func.__name__
             sqs_config = SQSEventConfig(
                 name=handler_name,
-                handler_string='app.%s' % event_func.__name__,
+                handler_string='%s.%s' % (_handler_module,
+                                          event_func.__name__),
                 queue=queue,
                 batch_size=batch_size,
             )
@@ -577,7 +585,7 @@ class Chalice(object):
             return EventSourceHandler(event_func, SQSEvent)
         return _register_sqs_message
 
-    def schedule(self, expression, name=None):
+    def schedule(self, expression, name=None, _handler_module='app'):
         def _register_schedule(event_func):
             handler_name = name
             if handler_name is None:
@@ -585,19 +593,21 @@ class Chalice(object):
             event_source = CloudWatchEventConfig(
                 name=handler_name,
                 schedule_expression=expression,
-                handler_string='app.%s' % event_func.__name__)
+                handler_string='%s.%s' % (
+                    _handler_module, event_func.__name__))
             self.event_sources.append(event_source)
             return EventSourceHandler(event_func, CloudWatchEvent)
         return _register_schedule
 
-    def lambda_function(self, name=None):
+    def lambda_function(self, name=None, _handler_module='app'):
         def _register_lambda_function(lambda_func):
             handler_name = name
             if handler_name is None:
                 handler_name = lambda_func.__name__
             wrapper = LambdaFunction(
                 lambda_func, name=handler_name,
-                handler_string='app.%s' % lambda_func.__name__)
+                handler_string='%s.%s' % (
+                    _handler_module, lambda_func.__name__))
             self.pure_lambda_functions.append(wrapper)
             return wrapper
         return _register_lambda_function
@@ -1054,3 +1064,92 @@ class SQSRecord(BaseLambdaEvent):
     def _extract_attributes(self, event_dict):
         self.body = event_dict['body']
         self.receipt_handle = event_dict['receiptHandle']
+
+
+class Blueprint(object):
+    def __init__(self, name):
+        self.name = name
+        self._deferred_registrations = []
+
+    def register_to_app(self, app, options):
+        # This is invoked whenever someone calls
+        # app.register_blueprint(myblueprint).  It's job is to
+        # go through all the deferred_registrations and call the
+        # appropriate methods on the app.
+        for func in self._deferred_registrations:
+            func(app, options)
+
+    def authorizer(self, name=None, **kwargs):
+        return self._create_registration_function(
+            decorator_name='authorizer',
+            function_name=name,
+            kwargs=kwargs,
+        )
+
+    def on_s3_event(self, bucket, events=None,
+                    prefix=None, suffix=None, name=None):
+        return self._create_registration_function(
+            decorator_name='on_s3_event',
+            function_name=name,
+            kwargs={'bucket': bucket, 'events': events,
+                    'prefix': prefix, 'suffix': suffix},
+        )
+
+    def on_sns_message(self, topic, name=None):
+        return self._create_registration_function(
+            decorator_name='on_sns_message',
+            function_name=name,
+            kwargs={'topic': topic},
+        )
+
+    def on_sqs_message(self, queue, batch_size=1, name=None):
+        return self._create_registration_function(
+            decorator_name='on_sqs_message',
+            function_name=name,
+            kwargs={'queue': queue, 'batch_size': batch_size},
+        )
+
+    def schedule(self, expression, name=None):
+        return self._create_registration_function(
+            decorator_name='schedule',
+            function_name=name,
+            kwargs={'expression': expression},
+        )
+
+    def lambda_function(self, name=None):
+        return self._create_registration_function(
+            decorator_name='lambda_function',
+            function_name=name,
+            kwargs={}
+        )
+
+    def route(self, path, **kwargs):
+        def _view_function(users_handler):
+            def _register_on_app(app, options):
+                url_prefix = options.get('url_prefix')
+                final_path = path
+                if url_prefix is not None:
+                    final_path = url_prefix + path
+                app.route(final_path, **kwargs)(users_handler)
+            self._deferred_registrations.append(_register_on_app)
+            return users_handler
+        return _view_function
+
+    def _create_registration_function(self, decorator_name,
+                                      function_name, kwargs):
+        def _lambda_handler(users_handler):
+            if function_name is None:
+                users_function_name = users_handler.__name__
+            else:
+                users_function_name = function_name
+            def _register_on_app(app, options):
+                name_prefix = options.get('name_prefix')
+                final_name = users_function_name
+                if name_prefix is not None:
+                    final_name = name_prefix + users_function_name
+                kwargs['name'] = final_name
+                kwargs['_handler_module'] = self.name
+                getattr(app, decorator_name)(**kwargs)(users_handler)
+            self._deferred_registrations.append(_register_on_app)
+            return users_handler
+        return _lambda_handler
