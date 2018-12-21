@@ -1633,7 +1633,6 @@ def test_can_combine_multiple_blueprints_in_single_app():
     def mybar():
         pass
 
-
     myapp.register_blueprint(foo)
     myapp.register_blueprint(bar)
 
@@ -1653,7 +1652,7 @@ def test_can_mount_apis_at_url_prefix():
         pass
 
     myapp.register_blueprint(foo, url_prefix='/myprefix')
-    assert list(myapp.routes) == ['/myprefix/bar', '/myprefix/foo']
+    assert list(sorted(myapp.routes)) == ['/myprefix/bar', '/myprefix/foo']
 
 
 def test_can_combine_lambda_functions_and_routes_in_blueprints():
@@ -1664,7 +1663,6 @@ def test_can_combine_lambda_functions_and_routes_in_blueprints():
     @foo.route('/foo')
     def myfoo():
         pass
-
 
     @foo.lambda_function()
     def myfunction(event, context):

@@ -503,9 +503,10 @@ class DecoratorAPI(object):
             handler_name = name
             if handler_name is None:
                 handler_name = user_handler.__name__
-            kwargs = registration_kwargs
             if registration_kwargs is not None:
                 kwargs = registration_kwargs
+            else:
+                kwargs = {}
             wrapped = self._wrap_handler(handler_type, handler_name,
                                          user_handler, kwargs)
             self._register_handler(handler_type, handler_name,
@@ -529,27 +530,161 @@ class DecoratorAPI(object):
             return ChaliceAuthorizer(handler_name, user_handler)
         return user_handler
 
-    def _register_handler(self, handler_type, handler_name,
-                          user_handler, wrapped_handler, kwargs):
+    def _register_handler(self, handler_type, name,
+                          user_handler, wrapped_handler, kwargs, options=None):
         raise NotImplementedError("_register_handler")
 
 
-class Chalice(DecoratorAPI):
+class _HandlerRegistration(object):
+
+    def __init__(self):
+        self.routes = defaultdict(dict)
+        self.builtin_auth_handlers = []
+        self.event_sources = []
+        self.pure_lambda_functions = []
+
+    def _do_register_handler(self, handler_type, name, user_handler,
+                             wrapped_handler, kwargs, options=None):
+        url_prefix = None
+        name_prefix = None
+        module_name = 'app'
+        if options is not None:
+            name_prefix = options.get('name_prefix')
+            if name_prefix is not None:
+                name = name_prefix + name
+            url_prefix = options.get('url_prefix')
+            if url_prefix is not None:
+                # Move url_prefix into kwargs so only the
+                # route() handler gets a url_prefix kwarg.
+                kwargs['url_prefix'] = url_prefix
+            # module_name is always provided if options is not None.
+            module_name = options['module_name']
+        handler_string = '%s.%s' % (module_name, user_handler.__name__)
+        getattr(self, '_register_%s' % handler_type)(
+            name=name,
+            user_handler=user_handler,
+            handler_string=handler_string,
+            wrapped_handler=wrapped_handler,
+            kwargs=kwargs,
+        )
+
+    def _register_lambda_function(self, name, user_handler,
+                                  handler_string, **unused):
+        wrapper = LambdaFunction(
+            user_handler, name=name,
+            handler_string=handler_string,
+        )
+        self.pure_lambda_functions.append(wrapper)
+
+    def _register_on_s3_event(self, name, handler_string, kwargs, **unused):
+        events = kwargs['events']
+        if events is None:
+            events = ['s3:ObjectCreated:*']
+        s3_event = S3EventConfig(
+            name=name,
+            bucket=kwargs['bucket'],
+            events=events,
+            prefix=kwargs['prefix'],
+            suffix=kwargs['suffix'],
+            handler_string=handler_string,
+        )
+        self.event_sources.append(s3_event)
+
+    def _register_on_sns_message(self, name, handler_string, kwargs, **unused):
+        sns_config = SNSEventConfig(
+            name=name,
+            handler_string=handler_string,
+            topic=kwargs['topic'],
+        )
+        self.event_sources.append(sns_config)
+
+    def _register_on_sqs_message(self, name, handler_string, kwargs, **unused):
+        sqs_config = SQSEventConfig(
+            name=name,
+            handler_string=handler_string,
+            queue=kwargs['queue'],
+            batch_size=kwargs['batch_size'],
+        )
+        self.event_sources.append(sqs_config)
+
+    def _register_schedule(self, name, handler_string, kwargs, **unused):
+        event_source = CloudWatchEventConfig(
+            name=name,
+            schedule_expression=kwargs['expression'],
+            handler_string=handler_string,
+        )
+        self.event_sources.append(event_source)
+
+    def _register_authorizer(self, name, handler_string, wrapped_handler,
+                             kwargs, **unused):
+        actual_kwargs = kwargs.copy()
+        ttl_seconds = actual_kwargs.pop('ttl_seconds', None)
+        execution_role = actual_kwargs.pop('execution_role', None)
+        if actual_kwargs:
+            raise TypeError(
+                'TypeError: authorizer() got unexpected keyword '
+                'arguments: %s' % ', '.join(list(actual_kwargs)))
+        auth_config = BuiltinAuthConfig(
+            name=name,
+            handler_string=handler_string,
+            ttl_seconds=ttl_seconds,
+            execution_role=execution_role,
+        )
+        wrapped_handler.config = auth_config
+        self.builtin_auth_handlers.append(auth_config)
+
+    def _register_route(self, name, user_handler, kwargs, **unused):
+        actual_kwargs = kwargs['kwargs']
+        path = kwargs['path']
+        url_prefix = kwargs.pop('url_prefix', None)
+        if url_prefix is not None:
+            path = '/'.join([url_prefix.rstrip('/'),
+                             path.strip('/')])
+        methods = actual_kwargs.pop('methods', ['GET'])
+        route_kwargs = {
+            'authorizer': actual_kwargs.pop('authorizer', None),
+            'api_key_required': actual_kwargs.pop('api_key_required', None),
+            'content_types': actual_kwargs.pop('content_types',
+                                               ['application/json']),
+            'cors': actual_kwargs.pop('cors', False),
+        }
+        if not isinstance(route_kwargs['content_types'], list):
+            raise ValueError(
+                'In view function "%s", the content_types '
+                'value must be a list, not %s: %s' % (
+                    name, type(route_kwargs['content_types']),
+                    route_kwargs['content_types']))
+        if actual_kwargs:
+            raise TypeError('TypeError: route() got unexpected keyword '
+                            'arguments: %s' % ', '.join(list(actual_kwargs)))
+        for method in methods:
+            if method in self.routes[path]:
+                raise ValueError(
+                    "Duplicate method: '%s' detected for route: '%s'\n"
+                    "between view functions: \"%s\" and \"%s\". A specific "
+                    "method may only be specified once for "
+                    "a particular path." % (
+                        method, path, self.routes[path][method].view_name,
+                        name)
+                )
+            entry = RouteEntry(user_handler, name, path, method,
+                               **route_kwargs)
+            self.routes[path][method] = entry
+
+
+class Chalice(_HandlerRegistration, DecoratorAPI):
 
     FORMAT_STRING = '%(name)s - %(levelname)s - %(message)s'
 
     def __init__(self, app_name, debug=False, configure_logs=True, env=None):
+        super(Chalice, self).__init__()
         self.app_name = app_name
         self.api = APIGateway()
-        self.routes = defaultdict(dict)
         self.current_request = None
         self.lambda_context = None
         self._debug = debug
         self.configure_logs = configure_logs
         self.log = logging.getLogger(self.app_name)
-        self.builtin_auth_handlers = []
-        self.event_sources = []
-        self.pure_lambda_functions = []
         if env is None:
             env = os.environ
         self._initialize(env)
@@ -605,109 +740,8 @@ class Chalice(DecoratorAPI):
 
     def _register_handler(self, handler_type, name, user_handler,
                           wrapped_handler, kwargs, options=None):
-        url_prefix = None
-        name_prefix = None
-        module_name = 'app'
-        if options is not None:
-            url_prefix = options.get('url_prefix')
-            name_prefix = options.get('name_prefix')
-            if name_prefix is not None:
-                name = name_prefix + name
-            # module_name is always provided if options is not None.
-            module_name = options['module_name']
-        if handler_type == 'lambda_function':
-            wrapper = LambdaFunction(
-                user_handler, name=name,
-                handler_string='%s.%s' % (module_name, user_handler.__name__),
-            )
-            self.pure_lambda_functions.append(wrapper)
-        elif handler_type == 'on_s3_event':
-            events = kwargs['events']
-            if events is None:
-                events = ['s3:ObjectCreated:*']
-            s3_event = S3EventConfig(
-                name=name,
-                bucket=kwargs['bucket'],
-                events=events,
-                prefix=kwargs['prefix'],
-                suffix=kwargs['suffix'],
-                handler_string='%s.%s' % (module_name, user_handler.__name__),
-            )
-            self.event_sources.append(s3_event)
-        elif handler_type == 'on_sns_message':
-            sns_config = SNSEventConfig(
-                name=name,
-                handler_string='%s.%s' % (module_name, user_handler.__name__),
-                topic=kwargs['topic'],
-            )
-            self.event_sources.append(sns_config)
-        elif handler_type == 'on_sqs_message':
-            sqs_config = SQSEventConfig(
-                name=name,
-                handler_string='%s.%s' % (module_name, user_handler.__name__),
-                queue=kwargs['queue'],
-                batch_size=kwargs['batch_size'],
-            )
-            self.event_sources.append(sqs_config)
-        elif handler_type == 'schedule':
-            event_source = CloudWatchEventConfig(
-                name=name,
-                schedule_expression=kwargs['expression'],
-                handler_string='%s.%s' % (module_name, user_handler.__name__))
-            self.event_sources.append(event_source)
-        elif handler_type == 'authorizer':
-            actual_kwargs = kwargs.copy()
-            ttl_seconds = actual_kwargs.pop('ttl_seconds', None)
-            execution_role = actual_kwargs.pop('execution_role', None)
-            if actual_kwargs:
-                raise TypeError(
-                    'TypeError: authorizer() got unexpected keyword '
-                    'arguments: %s' % ', '.join(list(actual_kwargs)))
-            auth_config = BuiltinAuthConfig(
-                name=name,
-                handler_string='%s.%s' % (module_name, user_handler.__name__),
-                ttl_seconds=ttl_seconds,
-                execution_role=execution_role,
-            )
-            wrapped_handler.config = auth_config
-            self.builtin_auth_handlers.append(auth_config)
-        elif handler_type == 'route':
-            actual_kwargs = kwargs['kwargs']
-            actual_kwargs['name'] = name
-            path = kwargs['path']
-            if url_prefix is not None:
-                path = '/'.join([url_prefix.rstrip('/'),
-                                 path.strip('/')])
-            self._add_route(path, user_handler, **actual_kwargs)
-
-    def _add_route(self, path, view_func, **kwargs):
-        name = kwargs.pop('name', view_func.__name__)
-        methods = kwargs.pop('methods', ['GET'])
-        authorizer = kwargs.pop('authorizer', None)
-        api_key_required = kwargs.pop('api_key_required', None)
-        content_types = kwargs.pop('content_types', ['application/json'])
-        cors = kwargs.pop('cors', False)
-        if not isinstance(content_types, list):
-            raise ValueError('In view function "%s", the content_types '
-                             'value must be a list, not %s: %s'
-                             % (name, type(content_types), content_types))
-        if kwargs:
-            raise TypeError('TypeError: route() got unexpected keyword '
-                            'arguments: %s' % ', '.join(list(kwargs)))
-        for method in methods:
-            if method in self.routes[path]:
-                raise ValueError(
-                    "Duplicate method: '%s' detected for route: '%s'\n"
-                    "between view functions: \"%s\" and \"%s\". A specific "
-                    "method may only be specified once for "
-                    "a particular path." % (
-                        method, path, self.routes[path][method].view_name,
-                        name)
-                )
-            entry = RouteEntry(view_func, name, path, method,
-                               api_key_required, content_types,
-                               cors, authorizer)
-            self.routes[path][method] = entry
+        self._do_register_handler(handler_type, name, user_handler,
+                                  wrapped_handler, kwargs, options)
 
     def __call__(self, event, context):
         # This is what's invoked via lambda.
@@ -1165,8 +1199,13 @@ class Blueprint(DecoratorAPI):
             function(app, all_options)
 
     def _register_handler(self, handler_type, name, user_handler,
-                          wrapped_handler, kwargs):
+                          wrapped_handler, kwargs, options=None):
+        # If we go through the public API (app.route, app.schedule, etc) then
+        # we have to duplicate either the methods or the params in this
+        # class.  We're using _register_handler as a tradeoff for cutting
+        # down on the duplication.
         self._deferred_registrations.append(
+            # pylint: disable=protected-access
             lambda app, options: app._register_handler(
                 handler_type, name, user_handler, wrapped_handler,
                 kwargs, options
