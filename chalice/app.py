@@ -441,7 +441,100 @@ class APIGateway(object):
         return list(self._DEFAULT_BINARY_TYPES)
 
 
-class Chalice(object):
+class DecoratorAPI(object):
+    def authorizer(self, ttl_seconds=None, execution_role=None, name=None):
+        return self._create_registration_function(
+            handler_type='authorizer',
+            name=name,
+            registration_kwargs={
+                'ttl_seconds': ttl_seconds, 'execution_role': execution_role,
+            }
+        )
+
+    def on_s3_event(self, bucket, events=None,
+                    prefix=None, suffix=None, name=None):
+        return self._create_registration_function(
+            handler_type='on_s3_event',
+            name=name,
+            registration_kwargs={
+                'bucket': bucket, 'events': events,
+                'prefix': prefix, 'suffix': suffix,
+            }
+        )
+
+    def on_sns_message(self, topic, name=None):
+        return self._create_registration_function(
+            handler_type='on_sns_message',
+            name=name,
+            registration_kwargs={'topic': topic}
+        )
+
+    def on_sqs_message(self, queue, batch_size=1, name=None):
+        return self._create_registration_function(
+            handler_type='on_sqs_message',
+            name=name,
+            registration_kwargs={'queue': queue, 'batch_size': batch_size}
+        )
+
+    def schedule(self, expression, name=None):
+        return self._create_registration_function(
+            handler_type='schedule',
+            name=name,
+            registration_kwargs={'expression': expression},
+        )
+
+    def route(self, path, **kwargs):
+        return self._create_registration_function(
+            handler_type='route',
+            name=kwargs.get('name'),
+            # This looks a little weird taking kwargs as a key,
+            # but to preserve backwards compatibility we have to
+            # keep the **kwargs signature in the route decorator.
+            registration_kwargs={'path': path, 'kwargs': kwargs},
+        )
+
+    def lambda_function(self, name=None):
+        return self._create_registration_function(
+            handler_type='lambda_function', name=name)
+
+    def _create_registration_function(self, handler_type, name=None,
+                                      registration_kwargs=None):
+        def _register_handler(user_handler):
+            handler_name = name
+            if handler_name is None:
+                handler_name = user_handler.__name__
+            kwargs = registration_kwargs
+            if registration_kwargs is not None:
+                kwargs = registration_kwargs
+            wrapped = self._wrap_handler(handler_type, handler_name,
+                                         user_handler, kwargs)
+            self._register_handler(handler_type, handler_name,
+                                   user_handler, wrapped, kwargs)
+            return wrapped
+        return _register_handler
+
+    def _wrap_handler(self, handler_type, handler_name, user_handler, kwargs):
+        event_classes = {
+            'on_s3_event': S3Event,
+            'on_sns_message': SNSEvent,
+            'on_sqs_message': SQSEvent,
+            'schedule': CloudWatchEvent,
+        }
+        if handler_type in event_classes:
+            return EventSourceHandler(
+                user_handler, event_classes[handler_type])
+        if handler_type == 'authorizer':
+            # Authorizer is special cased and doesn't quite fit the
+            # EventSourceHandler pattern.
+            return ChaliceAuthorizer(handler_name, user_handler)
+        return user_handler
+
+    def _register_handler(self, handler_type, handler_name,
+                          user_handler, wrapped_handler, kwargs):
+        raise NotImplementedError("_register_handler")
+
+
+class Chalice(DecoratorAPI):
 
     FORMAT_STRING = '%(name)s - %(levelname)s - %(message)s'
 
@@ -506,107 +599,86 @@ class Chalice(object):
             level = logging.ERROR
         self.log.setLevel(level)
 
-    def authorizer(self, name=None, **kwargs):
-        def _register_authorizer(auth_func):
-            auth_name = name
-            if auth_name is None:
-                auth_name = auth_func.__name__
-            ttl_seconds = kwargs.pop('ttl_seconds', None)
-            execution_role = kwargs.pop('execution_role', None)
-            if kwargs:
+    def register_blueprint(self, blueprint, name_prefix=None, url_prefix=None):
+        blueprint.register(self, options={'name_prefix': name_prefix,
+                                          'url_prefix': url_prefix})
+
+    def _register_handler(self, handler_type, name, user_handler,
+                          wrapped_handler, kwargs, options=None):
+        url_prefix = None
+        name_prefix = None
+        module_name = 'app'
+        if options is not None:
+            url_prefix = options.get('url_prefix')
+            name_prefix = options.get('name_prefix')
+            if name_prefix is not None:
+                name = name_prefix + name
+            # module_name is always provided if options is not None.
+            module_name = options['module_name']
+        if handler_type == 'lambda_function':
+            wrapper = LambdaFunction(
+                user_handler, name=name,
+                handler_string='%s.%s' % (module_name, user_handler.__name__),
+            )
+            self.pure_lambda_functions.append(wrapper)
+        elif handler_type == 'on_s3_event':
+            events = kwargs['events']
+            if events is None:
+                events = ['s3:ObjectCreated:*']
+            s3_event = S3EventConfig(
+                name=name,
+                bucket=kwargs['bucket'],
+                events=events,
+                prefix=kwargs['prefix'],
+                suffix=kwargs['suffix'],
+                handler_string='%s.%s' % (module_name, user_handler.__name__),
+            )
+            self.event_sources.append(s3_event)
+        elif handler_type == 'on_sns_message':
+            sns_config = SNSEventConfig(
+                name=name,
+                handler_string='%s.%s' % (module_name, user_handler.__name__),
+                topic=kwargs['topic'],
+            )
+            self.event_sources.append(sns_config)
+        elif handler_type == 'on_sqs_message':
+            sqs_config = SQSEventConfig(
+                name=name,
+                handler_string='%s.%s' % (module_name, user_handler.__name__),
+                queue=kwargs['queue'],
+                batch_size=kwargs['batch_size'],
+            )
+            self.event_sources.append(sqs_config)
+        elif handler_type == 'schedule':
+            event_source = CloudWatchEventConfig(
+                name=name,
+                schedule_expression=kwargs['expression'],
+                handler_string='%s.%s' % (module_name, user_handler.__name__))
+            self.event_sources.append(event_source)
+        elif handler_type == 'authorizer':
+            actual_kwargs = kwargs.copy()
+            ttl_seconds = actual_kwargs.pop('ttl_seconds', None)
+            execution_role = actual_kwargs.pop('execution_role', None)
+            if actual_kwargs:
                 raise TypeError(
                     'TypeError: authorizer() got unexpected keyword '
-                    'arguments: %s' % ', '.join(list(kwargs)))
+                    'arguments: %s' % ', '.join(list(actual_kwargs)))
             auth_config = BuiltinAuthConfig(
-                name=auth_name,
-                handler_string='app.%s' % auth_func.__name__,
+                name=name,
+                handler_string='%s.%s' % (module_name, user_handler.__name__),
                 ttl_seconds=ttl_seconds,
                 execution_role=execution_role,
             )
+            wrapped_handler.config = auth_config
             self.builtin_auth_handlers.append(auth_config)
-            return ChaliceAuthorizer(auth_name, auth_func, auth_config)
-        return _register_authorizer
-
-    def on_s3_event(self, bucket, events=None,
-                    prefix=None, suffix=None, name=None):
-        def _register_s3_event(event_func):
-            handler_name = name
-            if handler_name is None:
-                handler_name = event_func.__name__
-            trigger_events = events
-            if trigger_events is None:
-                trigger_events = ['s3:ObjectCreated:*']
-            s3_event = S3EventConfig(
-                name=handler_name,
-                bucket=bucket,
-                events=trigger_events,
-                prefix=prefix,
-                suffix=suffix,
-                handler_string='app.%s' % event_func.__name__,
-            )
-            self.event_sources.append(s3_event)
-            return EventSourceHandler(event_func, S3Event)
-        return _register_s3_event
-
-    def on_sns_message(self, topic, name=None):
-        def _register_sns_message(event_func):
-            handler_name = name
-            if handler_name is None:
-                handler_name = event_func.__name__
-            sns_config = SNSEventConfig(
-                name=handler_name,
-                handler_string='app.%s' % event_func.__name__,
-                topic=topic,
-            )
-            self.event_sources.append(sns_config)
-            return EventSourceHandler(event_func, SNSEvent)
-        return _register_sns_message
-
-    def on_sqs_message(self, queue, batch_size=1, name=None):
-        def _register_sqs_message(event_func):
-            handler_name = name
-            if handler_name is None:
-                handler_name = event_func.__name__
-            sqs_config = SQSEventConfig(
-                name=handler_name,
-                handler_string='app.%s' % event_func.__name__,
-                queue=queue,
-                batch_size=batch_size,
-            )
-            self.event_sources.append(sqs_config)
-            return EventSourceHandler(event_func, SQSEvent)
-        return _register_sqs_message
-
-    def schedule(self, expression, name=None):
-        def _register_schedule(event_func):
-            handler_name = name
-            if handler_name is None:
-                handler_name = event_func.__name__
-            event_source = CloudWatchEventConfig(
-                name=handler_name,
-                schedule_expression=expression,
-                handler_string='app.%s' % event_func.__name__)
-            self.event_sources.append(event_source)
-            return EventSourceHandler(event_func, CloudWatchEvent)
-        return _register_schedule
-
-    def lambda_function(self, name=None):
-        def _register_lambda_function(lambda_func):
-            handler_name = name
-            if handler_name is None:
-                handler_name = lambda_func.__name__
-            wrapper = LambdaFunction(
-                lambda_func, name=handler_name,
-                handler_string='app.%s' % lambda_func.__name__)
-            self.pure_lambda_functions.append(wrapper)
-            return wrapper
-        return _register_lambda_function
-
-    def route(self, path, **kwargs):
-        def _register_view(view_func):
-            self._add_route(path, view_func, **kwargs)
-            return view_func
-        return _register_view
+        elif handler_type == 'route':
+            actual_kwargs = kwargs['kwargs']
+            actual_kwargs['name'] = name
+            path = kwargs['path']
+            if url_prefix is not None:
+                path = '/'.join([url_prefix.rstrip('/'),
+                                 path.strip('/')])
+            self._add_route(path, user_handler, **actual_kwargs)
 
     def _add_route(self, path, view_func, **kwargs):
         name = kwargs.pop('name', view_func.__name__)
@@ -785,13 +857,36 @@ class BuiltinAuthConfig(object):
         self.execution_role = execution_role
 
 
+# ChaliceAuthorizer is unique in that the runtime component (the thing
+# that wraps the decorated function) also needs a reference to the config
+# object (the object the describes how to create the resource).  In
+# most event sources these are separate and don't need to know about
+# each other, but ChaliceAuthorizer does.  This is because the way
+# you associate a builtin authorizer with a view function is by passing
+# a direct reference:
+#
+# @app.authorizer(...)
+# def my_auth_function(...): pass
+#
+# @app.route('/', auth=my_auth_function)
+#
+# The 'route' part needs to know about the auth function for two reasons:
+#
+# 1. We use ``view.authorizer`` to figure out how to deploy the app
+# 2. We need a reference to the runtime handler for the auth in order
+#    to support local mode testing.
+# I *think* we can refactor things to handle both of those issues but
+# we would need more research to know for sure.  For now, this is a
+# special cased runtime class that knows about its config.
 class ChaliceAuthorizer(object):
-    def __init__(self, name, func, config):
+    def __init__(self, name, func):
         self.name = name
         self.func = func
-        self.config = config
+        # This is filled in during the @app.authorizer()
+        # processing.
+        self.config = None
 
-    def __call__(self, event, content):
+    def __call__(self, event, context):
         auth_request = self._transform_event(event)
         result = self.func(auth_request)
         if isinstance(result, AuthResponse):
@@ -1054,3 +1149,26 @@ class SQSRecord(BaseLambdaEvent):
     def _extract_attributes(self, event_dict):
         self.body = event_dict['body']
         self.receipt_handle = event_dict['receiptHandle']
+
+
+class Blueprint(DecoratorAPI):
+    def __init__(self, import_name, name_prefix=None, url_prefix=None):
+        self._import_name = import_name
+        self._name_prefix = name_prefix
+        self._url_prefix = url_prefix
+        self._deferred_registrations = []
+
+    def register(self, app, options):
+        all_options = options.copy()
+        all_options['module_name'] = self._import_name
+        for function in self._deferred_registrations:
+            function(app, all_options)
+
+    def _register_handler(self, handler_type, name, user_handler,
+                          wrapped_handler, kwargs):
+        self._deferred_registrations.append(
+            lambda app, options: app._register_handler(
+                handler_type, name, user_handler, wrapped_handler,
+                kwargs, options
+            )
+        )
