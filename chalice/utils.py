@@ -100,23 +100,30 @@ class ChaliceZipFile(zipfile.ZipFile):
     """Support deterministic zipfile generation.
 
     Normalizes datetime and permissions.
+
     """
 
     compression = 0  # Try to make mypy happy.
+    _default_time_time = (1980, 1, 1, 0, 0, 0)
 
     # pylint: disable=W0221
     def write(self, filename, arcname=None, compress_type=None):
         # type: (Text, Optional[Text], Optional[int]) -> None
-        # Only supports files, py2.7 and 3 have different signatures
-
-        info = zipfile.ZipInfo(arcname or filename)
-        # Grant other users permissions to read,
-        # else lambda blows up with mysterious error.
-        # http://unix.stackexchange.com/questions/14705/
-        info.external_attr = 0o644 << 16
+        # Only supports files, py2.7 and 3 have different signatures.
+        # We know that in our packager code we never call write() on
+        # directories.
+        info = zipfile.ZipInfo.from_file(filename=filename, arcname=arcname)
+        # The main thing that prevents deterministic zip file generation
+        # is that the mtime of the file is included in the zip metadata.
+        # We don't actually care what the mtime is when we run on lambda,
+        # so we always set it to the default value (which comes from
+        # zipfile.py).  This ensures that as long as the file contents don't
+        # change (or the permissions) then we'll always generate the exact
+        # same zip file bytes.
+        info.date_time = self._default_time_time
         info.compress_type = compress_type or self.compression
-        with open(filename, 'rb') as fh:
-            self.writestr(info, fh.read())
+        with open(filename, 'rb') as f:
+            self.writestr(info, f.read())
 
 
 def create_zip_file(source_dir, outfile):
