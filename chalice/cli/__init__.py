@@ -10,7 +10,6 @@ import sys
 import tempfile
 import shutil
 import traceback
-import functools
 import json
 
 import botocore.exceptions
@@ -128,27 +127,25 @@ def local(ctx, host='127.0.0.1', port=8000, stage=DEFAULT_STAGE_NAME,
     # type: (click.Context, str, int, str, bool) -> None
     factory = ctx.obj['factory']  # type: CLIFactory
     from chalice.cli import reloader
-    # We don't create the server here because that will bind the
-    # socket and we only want to do this in the worker process.
-    server_factory = functools.partial(
-        create_local_server, factory, host, port, stage)
-    # When running `chalice local`, a stdout logger is configured
-    # so you'll see the same stdout logging as you would when
-    # running in lambda.  This is configuring the root logger.
-    # The app-specific logger (app.log) will still continue
-    # to work.
     logging.basicConfig(
         stream=sys.stdout, level=logging.INFO, format='%(message)s')
     if autoreload:
-        project_dir = factory.create_config_obj(
-            chalice_stage_name=stage).project_dir
+        from chalice.cli.filewatch.stat import StatFileWatcher
+        from functools import partial
+        server_factory = partial(create_local_server, factory,
+                                 host, port, stage)
+        watcher = StatFileWatcher()
         rc = reloader.run_with_reloader(
-            server_factory, os.environ, project_dir)
+            factory.create_local_server_manager(server_factory),
+            watcher=watcher,
+            root_dir=factory.project_dir,
+        )
         # Click doesn't sys.exit() with the RC this function.  The
         # recommended way to do this is to use sys.exit() directly,
         # see: https://github.com/pallets/click/issues/747
         sys.exit(rc)
-    run_local_server(factory, host, port, stage)
+    local_dev_server = create_local_server(factory, host, port, stage)
+    local_dev_server.serve_forever()
 
 
 def create_local_server(factory, host, port, stage):
@@ -163,12 +160,6 @@ def create_local_server(factory, host, port, stage):
     validate_routes(routes)
     server = factory.create_local_server(app_obj, config, host, port)
     return server
-
-
-def run_local_server(factory, host, port, stage):
-    # type: (CLIFactory, str, int, str) -> None
-    server = create_local_server(factory, host, port, stage)
-    server.serve_forever()
 
 
 @cli.command()

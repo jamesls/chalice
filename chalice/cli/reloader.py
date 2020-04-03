@@ -23,92 +23,35 @@ opposed the parent process which just watches for restart requests from the
 worker process).
 
 """
-import subprocess
+import time
 import logging
-import copy
-import sys
 
 from typing import MutableMapping, Type, Callable, Optional  # noqa
 
-from chalice.cli.filewatch import RESTART_REQUEST_RC, WorkerProcess
-from chalice.local import LocalDevServer, HTTPServerThread  # noqa
+from chalice.local import ServerManager  # noqa
+from chalice.cli.filewatch import FileWatcher  # noqa
 
 
 LOGGER = logging.getLogger(__name__)
-WorkerProcType = Optional[Type[WorkerProcess]]
 
 
-def get_best_worker_process():
-    # type: () -> Type[WorkerProcess]
+def run_with_reloader(server_manager, watcher, root_dir):
+    # type: (ServerManager, FileWatcher, str) -> int
+    server_manager.start_server()
+    watcher.watch_for_file_changes(
+        root_dir, callback=server_manager.shutdown_server)
+    poll_time = 1
     try:
-        from chalice.cli.filewatch.eventbased import WatchdogWorkerProcess
-        LOGGER.debug("Using watchdog worker process.")
-        return WatchdogWorkerProcess
-    except ImportError:
-        from chalice.cli.filewatch.stat import StatWorkerProcess
-        LOGGER.debug("Using stat() based worker process.")
-        return StatWorkerProcess
-
-
-def start_parent_process(env):
-    # type: (MutableMapping) -> None
-    process = ParentProcess(env, subprocess.Popen)
-    process.main()
-
-
-def start_worker_process(server_factory, root_dir, worker_process_cls=None):
-    # type: (Callable[[], LocalDevServer], str, WorkerProcType) -> int
-    if worker_process_cls is None:
-        worker_process_cls = get_best_worker_process()
-    t = HTTPServerThread(server_factory)
-    worker = worker_process_cls(t)
-    LOGGER.debug("Starting worker...")
-    rc = worker.main(root_dir)
-    LOGGER.info("Restarting local dev server.")
-    return rc
-
-
-class ParentProcess(object):
-    """Spawns a child process and restarts it as needed."""
-    def __init__(self, env, popen):
-        # type: (MutableMapping, Type[subprocess.Popen]) -> None
-        self._env = copy.copy(env)
-        self._popen = popen
-
-    def main(self):
-        # type: () -> None
-        # This method launches a child worker and restarts it if it
-        # exits with RESTART_REQUEST_RC.  This method doesn't return.
-        # A user can Ctrl-C to stop the parent process.
         while True:
-            self._env['CHALICE_WORKER'] = 'true'
-            LOGGER.debug("Parent process starting child worker process...")
-            process = self._popen(sys.argv, env=self._env)
-            try:
-                process.communicate()
-                if process.returncode != RESTART_REQUEST_RC:
-                    return
-            except KeyboardInterrupt:
-                process.terminate()
-                raise
-
-
-def run_with_reloader(server_factory, env, root_dir, worker_process_cls=None):
-    # type: (Callable, MutableMapping, str, WorkerProcType) -> int
-    # This function is invoked in two possible modes, as the parent process
-    # or as a chalice worker.
-    try:
-        if env.get('CHALICE_WORKER') is not None:
-            # This is a chalice worker.  We need to start the main dev server
-            # in a daemon thread and install a file watcher.
-            return start_worker_process(server_factory, root_dir,
-                                        worker_process_cls)
-        else:
-            # This is the parent process.  It's just is to spawn an identical
-            # process but with the ``CHALICE_WORKER`` env var set.  It then
-            # will monitor this process and restart it if it exits with a
-            # RESTART_REQUEST exit code.
-            start_parent_process(env)
+            time.sleep(poll_time)
+            if not server_manager.server_running():
+                server_manager.start_server()
+    except Exception:
+        LOGGER.debug("Exception caught, shutting down dev server.",
+                     exc_info=True)
+        server_manager.shutdown_server()
+        raise
     except KeyboardInterrupt:
-        pass
+        LOGGER.debug("Ctrl-c caught, shutting down dev server.")
+        server_manager.shutdown_server()
     return 0

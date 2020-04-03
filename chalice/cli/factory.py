@@ -8,7 +8,7 @@ import functools
 import click
 from botocore.config import Config as BotocoreConfig
 from botocore.session import Session
-from typing import Any, Optional, Dict, MutableMapping  # noqa
+from typing import Any, Optional, Dict, MutableMapping, Callable  # noqa
 
 from chalice import __version__ as chalice_version
 from chalice.awsclient import TypedAWSClient
@@ -283,3 +283,8 @@ class CLIFactory(object):
     def create_local_server(self, app_obj, config, host, port):
         # type: (Chalice, Config, str, int) -> local.LocalDevServer
         return local.create_local_server(app_obj, config, host, port)
+
+    def create_local_server_manager(self, server_factory):
+        # type: (Callable[[], local.LocalDevServer]) -> local.ServerManager
+        manager = local.ServerManager(server_factory)
+        return manager

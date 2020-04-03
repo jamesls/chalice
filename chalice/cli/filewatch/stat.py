@@ -23,7 +23,7 @@ class StatWorkerProcess(WorkerProcess):
 
 
 class StatFileWatcher(FileWatcher):
-    POLL_INTERVAL = 1
+    POLL_INTERVAL = 2
 
     def __init__(self, osutils=None):
         # type: (Optional[OSUtils]) -> None
@@ -41,8 +41,7 @@ class StatFileWatcher(FileWatcher):
         t.daemon = True
         t.start()
         self._thread = t
-        LOGGER.debug("Stat file watching: %s, with callback: %s",
-                     root_dir, callback)
+        LOGGER.debug("Stat file watching: %s", root_dir)
 
     def poll_for_changes_until_shutdown(self, root_dir, callback):
         # type: (str, Callable[[], None]) -> None
@@ -61,32 +60,40 @@ class StatFileWatcher(FileWatcher):
     def _single_pass_poll(self, root_dir, callback):
         # type: (str, Callable[[], None]) -> None
         new_mtimes = {}  # type: Dict[str, int]
+        callback_invoked = False
+        # We want to make sure that we do a complete pass through every file
+        # we're watching so we can get updated mtimes.  However, we only invoke
+        # the callback at most once through every scan of the watched files.
         for path in self._recursive_walk_files(root_dir):
             if self._is_changed_file(path, new_mtimes):
-                callback()
-                return
-        if new_mtimes != self._mtime_cache:
+                if not callback_invoked:
+                    LOGGER.debug("Detected file change: %s (%s)",
+                                 path, new_mtimes[path])
+                    callback()
+                    callback_invoked = True
+        if not callback_invoked and new_mtimes != self._mtime_cache:
             # Files were removed.
             LOGGER.debug("Files removed, triggering restart.")
-            self._mtime_cache = new_mtimes
             callback()
-            return
+        self._mtime_cache = new_mtimes
 
     def _is_changed_file(self, path, new_mtimes):
         # type: (str, Dict[str, int]) -> bool
+        is_changed_file = False
         last_mtime = self._mtime_cache.get(path)
-        if last_mtime is None:
-            LOGGER.debug("File added: %s, triggering restart.", path)
-            return True
+        new_mtime = None  # type: Optional[int]
         try:
             new_mtime = self._osutils.mtime(path)
-            if new_mtime > last_mtime:
-                LOGGER.debug("File updated: %s, triggering restart.", path)
-                return True
             new_mtimes[path] = new_mtime
-            return False
         except (OSError, IOError):
-            return False
+            pass
+        if last_mtime is None:
+            LOGGER.debug("File added: %s, triggering restart.", path)
+            is_changed_file = True
+        elif new_mtime is not None and new_mtime > last_mtime:
+            LOGGER.debug("File updated: %s, triggering restart.", path)
+            is_changed_file = True
+        return is_changed_file
 
     def _recursive_walk_files(self, root_dir):
         # type: (str) -> Iterator[str]

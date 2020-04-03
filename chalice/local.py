@@ -4,9 +4,11 @@ This is intended only for local development purposes.
 
 """
 from __future__ import print_function
+import time
+import logging
+from multiprocessing import Process
 import re
 import threading
-import time
 import uuid
 import base64
 import functools
@@ -40,6 +42,7 @@ from chalice.config import Config  # noqa
 from chalice.compat import urlparse, parse_qs
 
 
+LOGGER = logging.getLogger(__name__)
 MatchResult = namedtuple('MatchResult', ['route', 'captured', 'query_params'])
 EventType = Dict[str, Any]
 ContextType = Dict[str, Any]
@@ -642,6 +645,9 @@ class ForkingHTTPServer(ForkingMixIn, HTTPServer):
     pass
 
 
+# TODO: You are here, you need to make sure we only import the app object
+# in the process we spawn, NEVER in the main process otherwise the forked
+# process inherits the module.
 class LocalDevServer(object):
     def __init__(self, app_object, config, host, port,
                  handler_cls=ChaliceRequestHandler,
@@ -652,7 +658,22 @@ class LocalDevServer(object):
         self.port = port
         self._wrapped_handler = functools.partial(
             handler_cls, app_object=app_object, config=config)
-        self.server = server_cls((host, port), self._wrapped_handler)
+        self._server_cls = server_cls
+        self._server = None  # type: Optional[HTTPServer]
+
+    @property
+    def server(self):
+        # type: () -> HTTPServer
+        if self._server is None:
+            self._server = self.bind_server()
+        return self._server
+
+    def bind_server(self):
+        # type: () -> HTTPServer
+        # This method should be called in process/thread
+        # that will actually be serving requests.
+        return self._server_cls((self.host, self.port),
+                                self._wrapped_handler)
 
     def handle_single_request(self):
         # type: () -> None
@@ -660,7 +681,8 @@ class LocalDevServer(object):
 
     def serve_forever(self):
         # type: () -> None
-        print("Serving on http://%s:%s" % (self.host, self.port))
+        msg = "Serving on http://%s:%s" % (self.host, self.port)
+        print(msg)
         self.server.serve_forever()
 
     def shutdown(self):
@@ -694,3 +716,55 @@ class HTTPServerThread(threading.Thread):
         # type: () -> None
         if self._server is not None:
             self._server.shutdown()
+
+
+class ServerManager(object):
+    def __init__(self, local_dev_server_factory):
+        # type: (Callable[[], LocalDevServer]) -> None
+        self._running_server_process = None  # type: Optional[Process]
+        self._local_dev_server_factory = local_dev_server_factory
+        self._lock = threading.RLock()
+
+    def start_server(self):
+        # type: () -> None
+        with self._lock:
+            LOGGER.debug("Starting server process.")
+            process = Process(
+                target=self._child_process_start_server)
+            self._running_server_process = process
+            self._running_server_process.start()
+
+    def _child_process_start_server(self):
+        # type: () -> None
+        # This function is run in the worker/child process.  This is where
+        # we need to import the app module to ensure we can pick up changes
+        # when we restart the server.
+        local_dev_server = self._local_dev_server_factory()
+        local_dev_server.serve_forever()
+
+    def restart_server(self):
+        # type: () -> None
+        with self._lock:
+            self.shutdown_server()
+            self.start_server()
+
+    def shutdown_server(self):
+        # type: () -> None
+        LOGGER.debug("Shutting down local dev server.")
+        with self._lock:
+            if self._running_server_process is not None:
+                self._running_server_process.terminate()
+            while True:
+                LOGGER.debug("Waiting for server process to shutdown.")
+                if not self.server_running():
+                    break
+                time.sleep(1)
+            self._running_server_process = None
+        LOGGER.debug("Local dev server shutdown.")
+
+    def server_running(self):
+        # type: () -> bool
+        with self._lock:
+            if self._running_server_process is None:
+                return False
+            return self._running_server_process.is_alive()
