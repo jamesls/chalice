@@ -91,7 +91,7 @@ import botocore.exceptions
 from botocore.vendored.requests import ConnectionError as \
     RequestsConnectionError
 from botocore.session import Session  # noqa
-from typing import Optional, Dict, List, Any, Type  # noqa
+from typing import Optional, Dict, List, Any, Type, cast  # noqa
 
 from chalice.config import Config  # noqa
 from chalice.compat import is_broken_pipe_error
@@ -115,6 +115,10 @@ from chalice.deploy.packager import PipRunner
 from chalice.deploy.packager import SubprocessPip
 from chalice.deploy.packager import DependencyBuilder as PipDependencyBuilder
 from chalice.deploy.packager import LambdaDeploymentPackager
+from chalice.deploy.packager import AppOnlyDeploymentPackager
+from chalice.deploy.packager import LayerDeploymentPackager
+from chalice.deploy.packager import BaseLambdaDeploymentPackager  # noqa
+from chalice.deploy.packager import EmptyPackageError
 from chalice.deploy.planner import PlanStage
 from chalice.deploy.planner import RemoteState
 from chalice.deploy.planner import NoopPlanner
@@ -268,7 +272,7 @@ def _create_deployer(session,       # type: Session
         application_builder=ApplicationGraphBuilder(),
         deps_builder=DependencyBuilder(),
         build_stage=create_build_stage(
-            osutils, UI(), TemplatedSwaggerGenerator(),
+            osutils, UI(), TemplatedSwaggerGenerator(), config
         ),
         plan_stage=PlanStage(
             osutils=osutils, remote_state=RemoteState(
@@ -280,24 +284,40 @@ def _create_deployer(session,       # type: Session
     )
 
 
-def create_build_stage(osutils, ui, swagger_gen):
-    # type: (OSUtils, UI, SwaggerGenerator) -> BuildStage
+def create_build_stage(osutils, ui, swagger_gen, config):
+    # type: (OSUtils, UI, SwaggerGenerator, Config) -> BuildStage
     pip_runner = PipRunner(pip=SubprocessPip(osutils=osutils),
                            osutils=osutils)
     dependency_builder = PipDependencyBuilder(
         osutils=osutils,
         pip_runner=pip_runner
     )
+    deployment_packager = cast(BaseDeployStep, None)
+    if config.automatic_layer:
+        deployment_packager = ManagedLayerDeploymentPackager(
+            lambda_packager=AppOnlyDeploymentPackager(
+                osutils=osutils,
+                dependency_builder=dependency_builder,
+                ui=ui,
+            ),
+            layer_packager=LayerDeploymentPackager(
+                osutils=osutils,
+                dependency_builder=dependency_builder,
+                ui=ui,
+            )
+        )
+    else:
+        deployment_packager = DeploymentPackager(
+            packager=LambdaDeploymentPackager(
+                osutils=osutils,
+                dependency_builder=dependency_builder,
+                ui=ui,
+            )
+        )
     build_stage = BuildStage(
         steps=[
             InjectDefaults(),
-            DeploymentPackager(
-                packager=LambdaDeploymentPackager(
-                    osutils=osutils,
-                    dependency_builder=dependency_builder,
-                    ui=ui,
-                ),
-            ),
+            deployment_packager,
             PolicyGenerator(
                 policy_gen=AppPolicyGenerator(
                     osutils=osutils
@@ -422,20 +442,54 @@ class DeploymentPackager(BaseDeployStep):
         # type: (LambdaDeploymentPackager) -> None
         self._packager = packager
 
-    def handle_lambdalayer(self, config, resource):
-        # type: (Config, models.LambdaLayer) -> None
-        if isinstance(resource.deployment_package.filename,
-                      models.Placeholder):
-            zip_filename = self._packager.create_layer_package(
-                config.project_dir, config.lambda_python_version)
-            resource.deployment_package.filename = zip_filename
-
     def handle_deploymentpackage(self, config, resource):
         # type: (Config, models.DeploymentPackage) -> None
         if isinstance(resource.filename, models.Placeholder):
             zip_filename = self._packager.create_deployment_package(
                 config.project_dir, config.lambda_python_version)
             resource.filename = zip_filename
+
+
+class ManagedLayerDeploymentPackager(BaseDeployStep):
+    # If we're creating a layer for non-app code there's two different
+    # packagers we need.  One for the Lambda functions (app code) and
+    # one for the Lambda layer (requirements.txt + vendor).
+    def __init__(self,
+                 lambda_packager,  # type: BaseLambdaDeploymentPackager
+                 layer_packager,   # type: BaseLambdaDeploymentPackager
+                 ):
+        # type: (...) -> None
+        self._lambda_packager = lambda_packager
+        self._layer_packager = layer_packager
+
+    def handle_lambdafunction(self, config, resource):
+        # type: (Config, models.LambdaFunction) -> None
+        if isinstance(resource.deployment_package.filename,
+                      models.Placeholder):
+            zip_filename = self._lambda_packager.create_deployment_package(
+                config.project_dir, config.lambda_python_version
+            )
+            resource.deployment_package.filename = zip_filename
+        self._handle_lambda_layer(config, resource)
+
+    def _handle_lambda_layer(self, config, resource):
+        # type: (Config, models.LambdaFunction) -> None
+        if resource.managed_layer is None:
+            return
+        managed_layer = resource.managed_layer
+        if isinstance(managed_layer.deployment_package.filename,
+                      models.Placeholder):
+            try:
+                zip_filename = self._layer_packager.create_deployment_package(
+                    config.project_dir, config.lambda_python_version
+                )
+                managed_layer.deployment_package.filename = zip_filename
+            except EmptyPackageError:
+                # An empty package is not valid in Lambda.  There's
+                # no point in trying to represent it in the model
+                # because nothing downstream (planner, SAM/tf) can
+                # consume as a useful entity.
+                resource.managed_layer = None
 
 
 class SwaggerBuilder(BaseDeployStep):

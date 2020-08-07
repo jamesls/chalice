@@ -356,6 +356,7 @@ class PlanStage(object):
                 value=resource.domain_name
             )
         ])
+        return api_calls
 
     def _plan_lambdalayer(self, resource):
         # type: (models.LambdaLayer) -> Sequence[InstructionMsg]
@@ -393,6 +394,46 @@ class PlanStage(object):
         )])
         return api_calls
 
+    def _handle_layer_publish_case(self, resource, api_calls):
+        # type: (models.LambdaFunction, List[InstructionMsg]) -> None
+        # If there's a non-None managed_layer on a Lambda function
+        # we always need to publish a new layer version regardless of
+        # the cleanup case.
+        if resource.managed_layer is None:
+            return
+        managed_layer = resource.managed_layer
+        filename = cast(str, managed_layer.deployment_package.filename)
+        api_calls.extend([(
+            models.APICall(
+                method_name='publish_layer',
+                params={'layer_name': managed_layer.layer_name,
+                        'zip_contents': self._osutils.get_file_contents(
+                            filename, binary=True),
+                        'runtime': managed_layer.runtime},
+                output_var='layer_version_arn'
+            ), "Creating lambda layer version: %s\n" % (
+                managed_layer.layer_name)),
+            models.RecordResourceVariable(
+                resource_type='lambda_layer',
+                resource_name=managed_layer.resource_name,
+                name='layer_version_arn',
+                variable_name='layer_version_arn',
+        )])
+
+    def _handle_layer_delete_case(self, resource, api_calls):
+        # type: (models.LambdaFunction, List[InstructionMsg]) -> None
+        if resource.managed_layer is None:
+            return
+        managed_layer = resource.managed_layer
+        if self._remote_state.resource_exists(managed_layer):
+            state = self._remote_state.resource_deployed_values(managed_layer)
+            api_calls.append(
+                models.APICall(
+                    method_name='delete_layer_version',
+                    params={'layer_version_arn': state['layer_version_arn']}
+                )
+            )
+
     def _plan_lambdafunction(self, resource):
         # type: (models.LambdaFunction) -> Sequence[InstructionMsg]
         role_arn = self._get_role_arn(resource.role)
@@ -427,11 +468,14 @@ class PlanStage(object):
                 % resource.function_name
             )
 
-        layers = [Variable('layer_version_arn')]  # type: List[Any]
+        api_calls = []  # type: List[InstructionMsg]
+        self._handle_layer_publish_case(resource, api_calls)
+        layers = []  # type: List[Any]
+        if resource.managed_layer is not None:
+            layers.append(Variable('layer_version_arn'))
         if resource.layers:
             layers.extend(resource.layers)
 
-        api_calls = []  # type: List[InstructionMsg]
         if not self._remote_state.resource_exists(resource):
             params = {
                 'function_name': resource.function_name,
@@ -497,6 +541,7 @@ class PlanStage(object):
                     variable_name=varname,
                 )
             ])
+            self._handle_layer_delete_case(resource, api_calls)
         api_calls.append(concurrency_api_call)
         return api_calls
 

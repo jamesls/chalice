@@ -182,6 +182,10 @@ class LambdaLayer(ManagedModel):
     runtime = attrib()                # type: str
     deployment_package = attrib()     # type: DeploymentPackage
 
+    def dependencies(self):
+        # type: () -> List[Model]
+        return [self.deployment_package]
+
 
 @attrs
 class LambdaFunction(ManagedModel):
@@ -198,7 +202,10 @@ class LambdaFunction(ManagedModel):
     security_group_ids = attrib()     # type: List[str]
     subnet_ids = attrib()             # type: List[str]
     reserved_concurrency = attrib()   # type: int
+    # These are customer created layers.
     layers = attrib()                 # type: List[str]
+    managed_layer = attrib(
+        default=None)                 # type: Opt[LambdaLayer]
 
     def dependencies(self):
         # type: () -> List[Model]
