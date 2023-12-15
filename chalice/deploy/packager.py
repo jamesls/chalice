@@ -501,6 +501,7 @@ class DependencyBuilder(object):
         'cp38': (2, 26),
         'cp310': (2, 26),
         'cp311': (2, 26),
+        'cp312': (2, 26),
     }
     # Fallback version if we're on an unknown python version
     # not in _RUNTIME_GLIBC.
