@@ -1116,7 +1116,23 @@ class TestSdistMetadataFetcher(object):
         '    version="%s"\n'
         ')\n'
     )
+    _PY_PROJECT_TOML = (
+        '[project]\n'
+        'name = "{package}"\n'
+        'version = "{version}"\n'
+        'description = "My package"\n'
+    )
     _VALID_TAR_FORMATS = ['tar.gz', 'tar.bz2']
+
+    def _write_pyproject_toml(self, directory, pyproject_toml):
+        sdist_path = os.path.join(directory, 'sdist.zip')
+        with zipfile.ZipFile(
+            sdist_path,
+            'w',
+            compression=zipfile.ZIP_DEFLATED,
+        ) as z:
+            z.writestr('sdist/pyproject.toml', pyproject_toml)
+        return sdist_path
 
     def _write_fake_sdist(self, setup_py, directory, ext,
                           pkg_info_contents=None):
@@ -1258,6 +1274,15 @@ class TestSdistMetadataFetcher(object):
             filepath = self._write_fake_sdist(setup_py, tempdir, 'tar.gz')
             with pytest.raises(UnsupportedPackageError):
                 sdist_reader.get_package_name_and_version(filepath)
+            
+    def test_py_project_toml_support(self, osutils, sdist_reader):
+        pyproject_toml = self._PY_PROJECT_TOML.format(
+            package='mypackage', version='0.0.1')
+        with osutils.tempdir() as tempdir:
+            filepath = self._write_pyproject_toml(tempdir, pyproject_toml)
+            name, version = sdist_reader.get_package_name_and_version(filepath)
+            assert name == 'mypackage'
+            assert version == '0.0.1'
 
 
 class TestPackage(object):
