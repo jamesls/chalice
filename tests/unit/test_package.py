@@ -616,10 +616,8 @@ class TestTerraformTemplate(TemplateTestBase):
                                app_name='myfoo',
                                api_gateway_stage='dev')
         template = self.generate_template(config)
-        assert template['data']['null_data_source']['chalice']['inputs'] == {
-            'app': 'myfoo',
-            'stage': 'dev'
-        }
+        assert template['locals']['app'] == 'myfoo'
+        assert template['locals']['stage'] == 'dev'
 
     def test_can_package_s3_event_handler_sans_filters(self, sample_app):
         @sample_app.on_s3_event(bucket='foo')
